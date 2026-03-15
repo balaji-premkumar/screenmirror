@@ -1,0 +1,55 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code related
+.vscode/
+
+# Rust/Cargo
+target/
+**/*.rs.bk
+
+# Node/JavaScript/TypeScript
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+**/ios/Flutter/.last_build_id
+/mobileApp/build/
+/mobileApp/android/app/debug/
+/mobileApp/android/app/profile/
+/mobileApp/android/app/release/
+app.*.symbols
+app.*.map.json
+
+# Local config
+local.properties
+
+# Logs
+*.log
