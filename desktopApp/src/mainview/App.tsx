@@ -252,7 +252,7 @@ function App() {
                 <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Sync Rate</div>
                 <div className={`text-xl font-black ${status.metrics.fps_actual > 0 ? 'text-blue-400' : 'text-gray-700'}`}>{status.metrics.fps_actual.toFixed(1)} <span className="text-[10px]">FPS</span></div>
             </div>
-            {status.devices.some(dev => dev.startsWith('Accessory|')) && (
+            {status.isConnected && (
                 <button 
                     onClick={openNativePreview} 
                     disabled={isOpeningPreview}
@@ -268,7 +268,7 @@ function App() {
           <div className="lg:col-span-2 space-y-6">
             
             {/* Stream Configuration */}
-            {status.devices.some(dev => dev.startsWith('Accessory|')) && (
+            {status.isConnected && (
             <section className="bg-[#0e1015] p-6 rounded-2xl border border-gray-800 shadow-2xl">
                 <div className="flex justify-between items-center mb-8 pb-4 border-b border-gray-800/50">
                     <h2 className="text-gray-500 text-[9px] font-black uppercase tracking-[0.2em]">Remote Control Settings</h2>
@@ -339,23 +339,24 @@ function App() {
                     ) : (
                         status.devices.map((dev) => {
                             const [type, name, id] = dev.split('|');
-                            const isConnected = type === 'Accessory';
+                            const isAccessory = type === 'Accessory';
+                            const isStreaming = isAccessory && status.isConnected;
                             const isLinking = linkingId === dev;
                             return (
-                                <div key={id} className={`flex justify-between items-center bg-black/40 p-4 rounded-xl border transition-all ${isConnected ? 'border-green-500/30' : 'border-gray-800/50 hover:border-orange-500/30'}`}>
+                                <div key={id} className={`flex justify-between items-center bg-black/40 p-4 rounded-xl border transition-all ${isStreaming ? 'border-green-500/30' : 'border-gray-800/50 hover:border-orange-500/30'}`}>
                                     <div className="flex items-center gap-4">
-                                        <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400 shadow-[0_0_10px_#4ade80]' : 'bg-blue-400'}`}></div>
+                                        <div className={`w-2 h-2 rounded-full ${isStreaming ? 'bg-green-400 shadow-[0_0_10px_#4ade80]' : 'bg-blue-400'}`}></div>
                                         <div>
                                             <div className="text-sm font-black text-white leading-none mb-1">{name}</div>
                                             <div className="text-[9px] text-gray-500 font-bold uppercase font-mono">{id} // {type}</div>
                                         </div>
                                     </div>
                                     <button 
-                                        onClick={() => isConnected ? disconnectDevice() : connectDevice(dev)} 
+                                        onClick={() => isStreaming ? disconnectDevice() : connectDevice(dev)} 
                                         disabled={isLinking}
-                                        className={`text-[10px] font-black uppercase px-6 py-2 rounded-lg border transition-all cursor-pointer ${isConnected ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500 hover:text-white' : 'bg-orange-500/10 text-orange-500 border-orange-500/20 hover:bg-orange-500 hover:text-black'} ${isLinking ? 'opacity-50 cursor-wait' : ''}`}
+                                        className={`text-[10px] font-black uppercase px-6 py-2 rounded-lg border transition-all cursor-pointer ${isStreaming ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500 hover:text-white' : 'bg-orange-500/10 text-orange-500 border-orange-500/20 hover:bg-orange-500 hover:text-black'} ${isLinking ? 'opacity-50 cursor-wait' : ''}`}
                                     >
-                                        {isConnected ? 'Disconnect' : isLinking ? 'Linking...' : 'Initiate'}
+                                        {isStreaming ? 'Disconnect' : isLinking ? 'Linking...' : 'Initiate'}
                                     </button>
                                 </div>
                             );

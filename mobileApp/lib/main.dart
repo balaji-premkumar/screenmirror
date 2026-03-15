@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'src/rust/frb_generated.dart';
@@ -76,8 +77,18 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat(reverse: true);
     _glow = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat(reverse: true);
     _log('SYSTEM', 'Mirror Companion v1.0 started');
+    _requestPermissions();
     _setupUsb();
     _initRust();
+  }
+
+  Future<void> _requestPermissions() async {
+    final status = await Permission.microphone.request();
+    if (status.isGranted) {
+      _log('SYSTEM', 'Microphone permission granted');
+    } else {
+      _log('WARN', 'Microphone permission denied — audio will not work');
+    }
   }
 
   @override

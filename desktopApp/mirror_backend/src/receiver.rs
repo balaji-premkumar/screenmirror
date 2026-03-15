@@ -11,6 +11,7 @@ pub static DISCOVERED_DEVICES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::ne
 static STREAMING_ACTIVE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static PENDING_CONFIG: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 pub static FORCE_DISCONNECT: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+pub static AUTO_RECONNECT_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 
 /// Public accessor for the streaming state, used by get_status() in lib.rs
 pub fn is_streaming() -> bool {
@@ -291,6 +292,11 @@ fn get_device_info(device: &rusb::Device<RusbContext>) -> Option<String> {
 pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
     log_event("INFO", "FFI", "handshake", &format!("CLI Handshake for {:04X}:{:04X}", target_vid, target_pid));
     
+    // Manual trigger re-enables auto-reconnect for this device re-enumeration
+    if let Ok(mut auto) = AUTO_RECONNECT_ENABLED.lock() {
+        *auto = true;
+    }
+
     std::thread::spawn(move || {
         let context = match RusbContext::new() {
             Ok(c) => c,
@@ -374,7 +380,13 @@ pub fn start_usb_listener_thread() {
                     if vid == 0x18D1 && (0x2D00..=0x2D05).contains(&pid) {
                         let info = get_device_info(&device).unwrap_or_else(|| "AOA Accessory".to_string());
                         candidates.push(format!("Accessory|{}|{:04X}:{:04X}", info, vid, pid));
-                        start_streaming_loop(device);
+                        
+                        // ONLY start streaming automatically if user hasn't manually disconnected
+                        if let Ok(auto) = AUTO_RECONNECT_ENABLED.lock() {
+                            if *auto {
+                                start_streaming_loop(device);
+                            }
+                        }
                     } else {
                         let mut android_candidate = false;
                         if let Ok(config) = device.active_config_descriptor() {

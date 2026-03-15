@@ -45,6 +45,15 @@ impl MetricsManager {
         self.dropped_count += 1;
     }
 
+    pub fn reset(&mut self) {
+        self.total_bytes = 0;
+        self.frame_count = 0;
+        self.last_tick = Instant::now();
+        self.start_time = Instant::now();
+        self.dropped_count = 0;
+        self.current_latency = 0;
+    }
+
     pub fn get_snapshot(&mut self) -> MetricsSnapshot {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick).as_secs_f64();

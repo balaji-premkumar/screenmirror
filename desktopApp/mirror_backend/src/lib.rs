@@ -44,6 +44,14 @@ pub extern "C" fn trigger_manual_handshake(vid: u16, pid: u16) -> i32 {
 pub extern "C" fn force_disconnect() -> i32 {
     if let Ok(mut flag) = receiver::FORCE_DISCONNECT.lock() {
         *flag = true;
+        // Also disable auto-reconnect for this session
+        if let Ok(mut auto) = receiver::AUTO_RECONNECT_ENABLED.lock() {
+            *auto = false;
+        }
+        // Reset metrics to starting point
+        if let Ok(mut m) = metrics::METRICS.lock() {
+            m.reset();
+        }
         return 0;
     }
     -1
