@@ -224,8 +224,9 @@ function App() {
     try {
         const rpc = getRpc();
         if (rpc) {
+            // Sending the 'stop' command natively triggers a disconnect in the backend
+            // due to our recent changes in lib.rs, so we don't need a separate disconnectDevice call.
             await rpc.request('syncConfig', { command: "stop" });
-            await rpc.request('disconnectDevice');
         }
     } catch (e) {
         console.error("Disconnect failed", e);

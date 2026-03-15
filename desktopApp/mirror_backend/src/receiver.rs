@@ -219,16 +219,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
         let mut idle_seconds = 0;
 
         loop {
-            // Check for termination flags
-            if let Ok(mut fd) = FORCE_DISCONNECT.lock() {
-                if *fd {
-                    *fd = false;
-                    log_event("WARN", "USB", "streaming", "User disconnect triggered.");
-                    break;
-                }
-            }
-
-            // Flush pending config commands
+            // Flush pending config commands FIRST, so "stop" commands reach the mobile device
             if let Ok(mut pending) = PENDING_CONFIG.lock() {
                 if let Some(config_json) = pending.take() {
                     let data = config_json.as_bytes();
@@ -237,6 +228,15 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
                         Ok(n) => log_event("SUCCESS", "USB", "streaming", &format!("Config write success ({} bytes)", n)),
                         Err(e) => log_event("ERROR", "USB", "streaming", &format!("Sync error: {:?}", e)),
                     }
+                }
+            }
+
+            // Check for termination flags AFTER writing pending configs
+            if let Ok(mut fd) = FORCE_DISCONNECT.lock() {
+                if *fd {
+                    *fd = false;
+                    log_event("WARN", "USB", "streaming", "User disconnect triggered. Exiting stream.");
+                    break;
                 }
             }
 

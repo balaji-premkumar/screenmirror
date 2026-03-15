@@ -246,6 +246,17 @@ pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, timesta
 #[no_mangle]
 pub extern "C" fn push_packet(data: *const u8, len: usize) -> i32 {
     let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    
+    // Pipe to ffplay if active
+    if let Ok(mut handle_guard) = renderer::FFPLAY_PROCESS.try_lock() {
+        if let Some(child) = handle_guard.as_mut() {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                let _ = stdin.write_all(slice);
+            }
+        }
+    }
+
     if let Some(state) = unsafe { STATE.as_mut() } {
         if state.queue.push(slice.to_vec()).is_err() {
             let mut m = metrics::METRICS.lock().unwrap();
