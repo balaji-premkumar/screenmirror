@@ -359,8 +359,6 @@ fn wait_for_aoa_reenumeration(context: &RusbContext) -> i32 {
 
 pub fn start_usb_listener_thread() {
     std::thread::spawn(move || {
-        // PERMANENT CONTEXT: Lives as long as the background thread.
-        // This context is shared via the Device objects it produces.
         let context = match RusbContext::new() {
             Ok(c) => c,
             Err(e) => {
@@ -369,19 +367,33 @@ pub fn start_usb_listener_thread() {
             }
         };
         log_event("INFO", "SYSTEM", "discovery", "Engine background scanning loop active.");
+        
+        let mut info_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
         loop {
             let mut candidates = Vec::new();
+            let streaming = is_streaming();
+
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
                     let desc = match device.device_descriptor() { Ok(d) => d, Err(_) => continue };
                     let vid = desc.vendor_id();
                     let pid = desc.product_id();
+                    let device_key = format!("{:04X}:{:04X}_{:?}", vid, pid, device.address());
 
                     if vid == 0x18D1 && (0x2D00..=0x2D05).contains(&pid) {
-                        let info = get_device_info(&device).unwrap_or_else(|| "AOA Accessory".to_string());
+                        // It's an accessory. 
+                        let info = if streaming {
+                            // Don't disturb the stream by opening the device if we are already active
+                            info_cache.get(&device_key).cloned().unwrap_or_else(|| "AOA Accessory".to_string())
+                        } else {
+                            let info = get_device_info(&device).unwrap_or_else(|| "AOA Accessory".to_string());
+                            info_cache.insert(device_key.clone(), info.clone());
+                            info
+                        };
+
                         candidates.push(format!("Accessory|{}|{:04X}:{:04X}", info, vid, pid));
                         
-                        // ONLY start streaming automatically if user hasn't manually disconnected
                         if let Ok(auto) = AUTO_RECONNECT_ENABLED.lock() {
                             if *auto {
                                 start_streaming_loop(device);
@@ -397,9 +409,14 @@ pub fn start_usb_listener_thread() {
                             }
                         }
                         if android_candidate {
-                            if let Some(info) = get_device_info(&device) {
-                                candidates.push(format!("Phone|{}|{:04X}:{:04X}", info, vid, pid));
-                            }
+                            let info = if let Some(cached) = info_cache.get(&device_key) {
+                                cached.clone()
+                            } else {
+                                let info = get_device_info(&device).unwrap_or_else(|| "Android Device".to_string());
+                                info_cache.insert(device_key.clone(), info.clone());
+                                info
+                            };
+                            candidates.push(format!("Phone|{}|{:04X}:{:04X}", info, vid, pid));
                         }
                     }
                 }

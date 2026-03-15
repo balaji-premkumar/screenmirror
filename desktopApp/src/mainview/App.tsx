@@ -119,19 +119,26 @@ function App() {
       try {
         const data = await rpc.request('getStatusUpdate') as StatusUpdate;
         if (data) {
-          setStatus(prev => ({
-            ...prev,
-            decoder: data.decoder || prev.decoder,
-            isConnected: data.isActive,
-            bufferSize: data.bufferSize,
-            devices: data.devices || prev.devices,
-            metrics: data.metrics || prev.metrics,
-            driverOk: data.driverOk,
-            // ACCUMULATE new logs instead of replacing
-            logs: data.newLogs && data.newLogs.length > 0
-              ? [...prev.logs, ...data.newLogs].slice(-MAX_LOGS)
-              : prev.logs
-          }));
+          setStatus(prev => {
+            const wasConnected = prev.isConnected;
+            const isConnected = data.isActive;
+            
+            return {
+                ...prev,
+                decoder: data.decoder || prev.decoder,
+                isConnected,
+                bufferSize: data.bufferSize,
+                devices: data.devices || prev.devices,
+                metrics: isConnected ? (data.metrics || prev.metrics) : { throughput_mbps: 0, pipeline_latency_ms: 0, fps_actual: 0, frames_dropped: 0, buffer_health: 0 },
+                driverOk: data.driverOk,
+                // Clear logs if we just disconnected
+                logs: !isConnected && wasConnected 
+                ? [] 
+                : (data.newLogs && data.newLogs.length > 0
+                    ? [...prev.logs, ...data.newLogs].slice(-MAX_LOGS)
+                    : prev.logs)
+            };
+          });
         }
       } catch (e) {
         // RPC not ready yet, ignore
