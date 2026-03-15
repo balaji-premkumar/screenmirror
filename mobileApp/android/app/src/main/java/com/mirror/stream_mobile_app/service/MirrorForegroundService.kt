@@ -102,6 +102,14 @@ class MirrorForegroundService : Service() {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data) ?: return
 
+        // REQUIRED: Must register a callback on Android 14+ / SDK 34+
+        mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                android.util.Log.i("MirrorService", "MediaProjection stopped by system")
+                stopSelf()
+            }
+        }, null)
+
         val width = if (resStr == "720p") 1280 else if (resStr == "2K") 2560 else if (resStr == "4K") 3840 else 1920
         val height = if (resStr == "720p") 720 else if (resStr == "2K") 1440 else if (resStr == "4K") 2160 else 1080
         val dpi = 400

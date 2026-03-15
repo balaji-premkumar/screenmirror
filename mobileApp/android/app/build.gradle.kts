@@ -23,7 +23,7 @@ android {
         // ...
         applicationId = "com.mirror.stream_mobile_app"
         minSdk = 24 // Required for some USB/MediaCodec features
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
