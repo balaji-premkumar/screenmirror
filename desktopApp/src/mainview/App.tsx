@@ -89,6 +89,7 @@ function App() {
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [isRepairing, setIsRepairing] = useState(false);
   const [isOpeningPreview, setIsOpeningPreview] = useState(false);
+  const [isObsActive, setIsObsActive] = useState(false);
 
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -96,6 +97,19 @@ function App() {
   const getRpc = useCallback(() => {
     return window.__mirrorRpc || (window.Electrobun && window.Electrobun.rpc);
   }, []);
+
+  const toggleObsFeed = async () => {
+    const newState = !isObsActive;
+    try {
+        const rpc = getRpc();
+        if (rpc) {
+            await rpc.request('toggleObsFeed', { enabled: newState });
+            setIsObsActive(newState);
+        }
+    } catch (e) {
+        console.error("OBS Feed toggle failed", e);
+    }
+  };
 
   // Poll status from Bun process via RPC every 500ms
   useEffect(() => {
@@ -253,13 +267,21 @@ function App() {
                 <div className={`text-xl font-black ${status.metrics.fps_actual > 0 ? 'text-blue-400' : 'text-gray-700'}`}>{status.metrics.fps_actual.toFixed(1)} <span className="text-[10px]">FPS</span></div>
             </div>
             {status.isConnected && (
-                <button 
-                    onClick={openNativePreview} 
-                    disabled={isOpeningPreview}
-                    className={`bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black uppercase px-6 py-3 rounded-xl transition-all shadow-xl shadow-orange-900/20 active:scale-[0.98] cursor-pointer ${isOpeningPreview ? 'opacity-50 cursor-wait' : ''}`}
-                >
-                    {isOpeningPreview ? 'Launching...' : 'Launch Native Pipeline'}
-                </button>
+                <div className="flex gap-2">
+                    <button 
+                        onClick={toggleObsFeed}
+                        className={`text-[10px] font-black uppercase px-4 py-3 rounded-xl border transition-all shadow-xl active:scale-[0.98] cursor-pointer ${isObsActive ? 'bg-blue-600 border-blue-400 text-white shadow-blue-900/20' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+                    >
+                        {isObsActive ? 'OBS Feed: Active' : 'Direct to OBS'}
+                    </button>
+                    <button 
+                        onClick={openNativePreview} 
+                        disabled={isOpeningPreview}
+                        className={`bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black uppercase px-6 py-3 rounded-xl transition-all shadow-xl shadow-orange-900/20 active:scale-[0.98] cursor-pointer ${isOpeningPreview ? 'opacity-50 cursor-wait' : ''}`}
+                    >
+                        {isOpeningPreview ? 'Launching...' : 'Launch Native Pipeline'}
+                    </button>
+                </div>
             )}
           </div>
         </header>

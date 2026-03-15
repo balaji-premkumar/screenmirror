@@ -102,15 +102,21 @@ pub fn start_native_preview() {
 
             match event {
                 Event::WindowEvent { ref event, window_id } if window_id == window.id() => match event {
-                    WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::CloseRequested => {
+                        target.exit();
+                    },
                     WindowEvent::Resized(physical_size) => {
                         // Handle resize logic if needed
                     },
                     WindowEvent::RedrawRequested => {
-                        // Render frame here
+                        // In a real high-speed implementation, we'd copy the shared memory frame 
+                        // to a WGPU texture and draw it. For now, this ensures the window exists.
                     }
                     _ => {}
                 },
+                Event::AboutToWait => {
+                    window.request_redraw();
+                }
                 _ => {}
             }
         }).unwrap();

@@ -63,9 +63,25 @@ const rpc = defineElectrobunRPC('bun', {
                 console.log("Enterprise RPC: Disconnecting device");
                 return lib.symbols.force_disconnect();
             },
-            openNativePreview: () => {
-                console.log("Enterprise RPC: Opening Native Preview");
-                return lib.symbols.open_native_preview();
+            openNativePreview: async () => {
+                console.log("Enterprise RPC: Opening Native Preview Window");
+                // Option 1: Launch the high-speed WGPU native window
+                lib.symbols.open_native_preview();
+                
+                // Option 2: Also open an Electrobun window for a separate UI view if needed
+                const previewUrl = await getMainViewUrl();
+                new BrowserWindow({
+                    title: "Mirror Stream - Live Preview",
+                    url: previewUrl,
+                    frame: { width: 960, height: 540, x: 300, y: 300 }
+                });
+                return 0;
+            },
+            toggleObsFeed: (data: { enabled: boolean }) => {
+                console.log(`Enterprise RPC: OBS Feed toggled to ${data.enabled}`);
+                // In a production app, we'd pass this flag to the Rust backend 
+                // to selectively enable/disable shared memory writes.
+                return { success: true };
             },
             // Polling endpoint — View requests telemetry from Bun
             getStatusUpdate: () => {
