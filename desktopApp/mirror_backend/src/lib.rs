@@ -41,6 +41,20 @@ pub extern "C" fn trigger_manual_handshake(vid: u16, pid: u16) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn toggle_auto_reconnect(enabled: i32) {
+    if let Ok(mut auto) = receiver::AUTO_RECONNECT_ENABLED.lock() {
+        *auto = enabled != 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stop_all_streams() {
+    if let Ok(mut flag) = receiver::FORCE_DISCONNECT.lock() {
+        *flag = true;
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn force_disconnect() -> i32 {
     if let Ok(mut flag) = receiver::FORCE_DISCONNECT.lock() {
         *flag = true;
@@ -65,6 +79,16 @@ pub extern "C" fn sync_config(json: *const libc::c_char) -> i32 {
         if let Ok(s) = c_str.to_str() {
             if let Ok(mut config) = receiver::PENDING_CONFIG.lock() {
                 *config = Some(s.to_string());
+                
+                // If the command is stop, we also reset auto-reconnect for this device
+                if s.contains("\"command\":\"stop\"") {
+                    if let Ok(mut auto) = receiver::AUTO_RECONNECT_ENABLED.lock() {
+                        *auto = false;
+                    }
+                    if let Ok(mut flag) = receiver::FORCE_DISCONNECT.lock() {
+                        *flag = true;
+                    }
+                }
                 return 0;
             }
         }

@@ -31,6 +31,8 @@ const lib = dlopen(libPath, {
   trigger_manual_handshake: { args: [FFIType.u16, FFIType.u16], returns: FFIType.i32 },
   sync_config: { args: [FFIType.cstring], returns: FFIType.i32 },
   force_disconnect: { args: [], returns: FFIType.i32 },
+  toggle_auto_reconnect: { args: [FFIType.i32], returns: FFIType.void },
+  stop_all_streams: { args: [], returns: FFIType.void },
   open_native_preview: { args: [], returns: FFIType.i32 },
 });
 
@@ -81,6 +83,11 @@ const rpc = defineElectrobunRPC('bun', {
                 console.log(`Enterprise RPC: OBS Feed toggled to ${data.enabled}`);
                 // In a production app, we'd pass this flag to the Rust backend 
                 // to selectively enable/disable shared memory writes.
+                return { success: true };
+            },
+            toggleAutoReconnect: (data: { enabled: boolean }) => {
+                console.log(`Enterprise RPC: Auto-reconnect toggled to ${data.enabled}`);
+                lib.symbols.toggle_auto_reconnect(data.enabled ? 1 : 0);
                 return { success: true };
             },
             // Polling endpoint — View requests telemetry from Bun

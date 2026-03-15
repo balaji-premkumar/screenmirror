@@ -168,9 +168,16 @@ function App() {
         const rpc = getRpc();
         if (rpc) {
             const parts = idInfo.split('|');
+            const type = parts[0];
             const id = parts[parts.length - 1]; 
             const [vid, pid] = id.split(':').map(s => parseInt(s, 16));
-            await rpc.request('triggerHandshake', { vid, pid });
+            
+            if (type === 'Accessory') {
+                // Already in accessory mode, just re-enable auto-connect
+                await rpc.request('toggleAutoReconnect', { enabled: true });
+            } else {
+                await rpc.request('triggerHandshake', { vid, pid });
+            }
         }
     } catch (e) {
         console.error("Connection failed", e);
