@@ -89,7 +89,11 @@ class MirrorForegroundService : Service() {
         }
 
         if (resultCode == Activity.RESULT_OK && data != null) {
-            startProjection(resultCode, data, resStr, bitStr, fpsStr)
+            if (!isRunning) {
+                startProjection(resultCode, data, resStr, bitStr, fpsStr)
+            } else {
+                android.util.Log.i("MirrorService", "Projection already running, ignoring start request")
+            }
         }
 
         return START_NOT_STICKY

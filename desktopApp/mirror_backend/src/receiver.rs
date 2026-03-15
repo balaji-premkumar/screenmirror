@@ -183,7 +183,6 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
 
         log_event("SUCCESS", "USB", "streaming", "Mobile link established. Pipeline active.");
         
-        // Detect endpoints for this specific device re-enumeration
         let mut endpoint_in = 0x81;
         let mut endpoint_out = 0x02;
         let mut found_out = false;
@@ -215,7 +214,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
             log_event("WARN", "USB", "streaming", "No specific OUT endpoint found, using default 0x02.");
         }
 
-        let mut buf = [0u8; 65536]; // 64KB read buffer
+        let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer for high-bitrate video
         let mut demuxer = crate::demuxer::Demuxer::new();
         let mut idle_seconds = 0;
 

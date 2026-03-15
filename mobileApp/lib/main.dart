@@ -80,6 +80,21 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _requestPermissions();
     _setupUsb();
     _initRust();
+    _checkInitialAccessory();
+  }
+
+  Future<void> _checkInitialAccessory() async {
+    // Small delay to let Rust initialize first if possible
+    await Future.delayed(const Duration(milliseconds: 500));
+    try {
+      final int? fd = await _ch.invokeMethod<int>('getInitialAccessory');
+      if (fd != null && fd >= 0) {
+        _log('USB', 'Recovered existing accessory — FD=$fd');
+        _onConnected(fd);
+      }
+    } catch (e) {
+      _log('WARN', 'Initial accessory check failed: $e');
+    }
   }
 
   Future<void> _requestPermissions() async {
