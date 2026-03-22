@@ -80,23 +80,9 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _requestPermissions();
     _setupUsb();
     _initRust();
-    _checkInitialAccessory();
   }
 
-  Future<void> _checkInitialAccessory() async {
-    // Small delay to let Rust initialize first if possible
-    await Future.delayed(const Duration(milliseconds: 500));
-    try {
-      final int? fd = await _ch.invokeMethod<int>('getInitialAccessory');
-      if (fd != null && fd >= 0) {
-        _log('USB', 'Recovered existing accessory — FD=$fd');
-        _onConnected(fd);
-      }
-    } catch (e) {
-      _log('WARN', 'Initial accessory check failed: $e');
-    }
-  }
-
+  // Removed `_checkInitialAccessory()` implementation because it was duplicated in `_setupUsb()`
   Future<void> _requestPermissions() async {
     final status = await Permission.microphone.request();
     if (status.isGranted) {
@@ -110,6 +96,7 @@ class _CompanionDashboardState extends State<CompanionDashboard>
   void dispose() {
     _metricsTimer?.cancel();
     _uptimeTimer?.cancel();
+    _configPollTimer?.cancel();
     _pulse.dispose();
     _glow.dispose();
     _logScroll.dispose();

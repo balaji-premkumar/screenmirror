@@ -11,8 +11,9 @@ pub mod demuxer;
 pub mod receiver;
 pub mod metrics;
 pub mod renderer;
+pub mod obs_feed;
 
-#[repr(C, packed)]
+#[repr(C)]
 pub struct FrameHeader {
     pub magic: [u8; 4],
     pub width: u32,
@@ -27,31 +28,72 @@ pub struct MirrorState {
     pub height: u32,
 }
 
-static mut STATE: Option<MirrorState> = None;
+unsafe impl Send for MirrorState {}
+unsafe impl Sync for MirrorState {}
+
+pub static STATE: Lazy<Mutex<Option<MirrorState>>> = Lazy::new(|| Mutex::new(None));
 
 #[no_mangle]
-pub extern "C" fn open_native_preview() -> i32 {
-    renderer::start_native_preview();
+pub extern "C" fn open_native_preview(project_root: *const libc::c_char) -> i32 {
+    let root = unsafe {
+        if project_root.is_null() { "" } else { std::ffi::CStr::from_ptr(project_root).to_str().unwrap_or("") }
+    };
+    renderer::start_native_preview(root);
     0
+}
+
+// ── OBS & System Detection ──────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn check_obs_installed() -> i32 {
+    if obs_feed::check_obs_installed() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn check_obs_plugin_installed() -> i32 {
+    if obs_feed::check_plugin_installed() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn check_ffplay_available(project_root: *const libc::c_char) -> i32 {
+    let root = unsafe {
+        if project_root.is_null() { "" } else { std::ffi::CStr::from_ptr(project_root).to_str().unwrap_or("") }
+    };
+    if obs_feed::check_ffplay_available(root) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn get_obs_plugin_dir() -> *mut libc::c_char {
+    let dir = obs_feed::get_obs_plugin_dir().unwrap_or_default();
+    let c_str = std::ffi::CString::new(dir).unwrap_or_default();
+    c_str.into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn install_obs_plugin() -> i32 {
+    // Resolve the project root from the library's own path
+    let project_root = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    obs_feed::install_plugin(&project_root)
+}
+
+#[no_mangle]
+pub extern "C" fn toggle_obs_feed(enabled: i32) {
+    obs_feed::set_enabled(enabled != 0);
 }
 
 #[no_mangle]
 pub extern "C" fn trigger_manual_handshake(vid: u16, pid: u16) -> i32 {
+    if let Ok(mut fd) = receiver::FORCE_DISCONNECT.lock() { *fd = false; }
     receiver::trigger_manual_handshake(vid, pid)
 }
 
 #[no_mangle]
 pub extern "C" fn toggle_auto_reconnect(enabled: i32) {
-    if let Ok(mut auto) = receiver::AUTO_RECONNECT_ENABLED.lock() {
-        *auto = enabled != 0;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn stop_all_streams() {
-    if let Ok(mut flag) = receiver::FORCE_DISCONNECT.lock() {
-        *flag = true;
-    }
+    if let Ok(mut fd) = receiver::FORCE_DISCONNECT.lock() { *fd = false; }
+    let mut auto = receiver::AUTO_RECONNECT_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
+    *auto = enabled != 0;
 }
 
 #[no_mangle]
@@ -98,17 +140,17 @@ pub extern "C" fn sync_config(json: *const libc::c_char) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn get_devices() -> *mut libc::c_char {
-    let list = receiver::DISCOVERED_DEVICES.lock().unwrap();
+    let list = receiver::DISCOVERED_DEVICES.lock().unwrap_or_else(|e| e.into_inner());
     let combined = list.join(",");
-    let c_str = std::ffi::CString::new(combined).unwrap();
+    let c_str = std::ffi::CString::new(combined.replace('\0', "")).unwrap_or_default();
     c_str.into_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn get_structured_logs() -> *mut libc::c_char {
-    let logs = receiver::LOG_BUFFER.lock().unwrap();
+    let logs = receiver::LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     let json = serde_json::to_string(&*logs).unwrap_or_else(|_| "[]".to_string());
-    let c_str = std::ffi::CString::new(json).unwrap();
+    let c_str = std::ffi::CString::new(json.replace('\0', "")).unwrap_or_default();
     c_str.into_raw()
 }
 
@@ -116,20 +158,17 @@ pub extern "C" fn get_structured_logs() -> *mut libc::c_char {
 pub extern "C" fn get_new_logs() -> *mut libc::c_char {
     let new_logs = receiver::get_new_logs();
     let json = serde_json::to_string(&new_logs).unwrap_or_else(|_| "[]".to_string());
-    let c_str = std::ffi::CString::new(json).unwrap();
+    let c_str = std::ffi::CString::new(json.replace('\0', "")).unwrap_or_default();
     c_str.into_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn get_metrics() -> *mut libc::c_char {
-    if let Ok(mut manager) = metrics::METRICS.lock() {
-        let snapshot = manager.get_snapshot();
-        let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
-        let c_str = std::ffi::CString::new(json).unwrap();
-        c_str.into_raw()
-    } else {
-        std::ffi::CString::new("{}").unwrap().into_raw()
-    }
+    let mut manager = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = manager.get_snapshot();
+    let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+    let c_str = std::ffi::CString::new(json.replace('\0', "")).unwrap_or_default();
+    c_str.into_raw()
 }
 
 #[no_mangle]
@@ -220,25 +259,36 @@ pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
     let queue = Arc::new(ConcurrentQueue::unbounded());
     decoder::start_decoder_thread(queue.clone());
     receiver::start_usb_listener_thread();
-    unsafe { STATE = Some(MirrorState { shmem, queue, width, height }); }
+
+    // Initialise the OBS shared memory feed (separate from the internal shmem)
+    obs_feed::init(width, height);
+
+    if let Ok(mut state_lock) = STATE.lock() {
+        *state_lock = Some(MirrorState { shmem, queue, width, height });
+    }
     0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, timestamp: u64) -> i32 {
-    if let Some(state) = STATE.as_mut() {
-        let start = Instant::now();
-        let ptr = state.shmem.as_ptr();
-        let header = FrameHeader { magic: *b"MIRR", width: state.width, height: state.height, timestamp };
-        std::ptr::copy_nonoverlapping(&header as *const FrameHeader as *const u8, ptr, std::mem::size_of::<FrameHeader>());
-        let data_ptr = ptr.add(std::mem::size_of::<FrameHeader>());
-        let copy_len = len.min((state.width * state.height * 4) as usize);
-        std::ptr::copy_nonoverlapping(data, data_ptr, copy_len);
-        
-        let mut m = metrics::METRICS.lock().unwrap();
-        m.record_frame(len, start.elapsed().as_millis() as u64);
-        
-        return 0;
+    if let Ok(mut state_lock) = STATE.lock() {
+        if let Some(state) = state_lock.as_mut() {
+            let start = Instant::now();
+            let ptr = state.shmem.as_ptr();
+            let header = FrameHeader { magic: *b"MIRR", width: state.width, height: state.height, timestamp };
+            std::ptr::copy_nonoverlapping(&header as *const FrameHeader as *const u8, ptr, std::mem::size_of::<FrameHeader>());
+            let data_ptr = ptr.add(std::mem::size_of::<FrameHeader>());
+            let copy_len = len.min((state.width * state.height * 4) as usize);
+            std::ptr::copy_nonoverlapping(data, data_ptr, copy_len);
+            
+            let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
+            m.record_frame(len, start.elapsed().as_millis() as u64);
+
+            // Also push to OBS shared memory feed if enabled
+            obs_feed::write_frame(data, len, state.width, state.height, timestamp);
+
+            return 0;
+        }
     }
     -1
 }
@@ -257,12 +307,14 @@ pub extern "C" fn push_packet(data: *const u8, len: usize) -> i32 {
         }
     }
 
-    if let Some(state) = unsafe { STATE.as_mut() } {
-        if state.queue.push(slice.to_vec()).is_err() {
-            let mut m = metrics::METRICS.lock().unwrap();
-            m.record_drop();
+    if let Ok(mut state_lock) = STATE.lock() {
+        if let Some(state) = state_lock.as_mut() {
+            if state.queue.push(slice.to_vec()).is_err() {
+                let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
+                m.record_drop();
+            }
+            return 0;
         }
-        return 0;
     }
     -1
 }
@@ -271,14 +323,15 @@ pub extern "C" fn push_packet(data: *const u8, len: usize) -> i32 {
 pub extern "C" fn get_status() -> i32 {
     // Return 1 only when a USB device is actively connected and streaming,
     // not just when the mirror state has been initialized.
-    if unsafe { STATE.is_some() } && receiver::is_streaming() { 1 } else { 0 }
+    if STATE.lock().unwrap_or_else(|e| e.into_inner()).is_some() && receiver::is_streaming() { 1 } else { 0 }
 }
 
 #[no_mangle]
 pub extern "C" fn get_buffer_size() -> i32 {
-    if let Some(state) = unsafe { STATE.as_ref() } {
-        state.queue.len() as i32
-    } else {
-        -1
+    if let Ok(state_lock) = STATE.lock() {
+        if let Some(state) = state_lock.as_ref() {
+            return state.queue.len() as i32;
+        }
     }
+    -1
 }

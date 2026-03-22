@@ -6,7 +6,7 @@ use crate::receiver::log_event;
 
 pub static FFPLAY_PROCESS: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
 
-pub fn start_native_preview() {
+pub fn start_native_preview(project_root: &str) {
     log_event("INFO", "PREVIEW", "ffplay", "Launching ffplay native pipeline...");
     
     // Kill existing process if any
@@ -16,7 +16,14 @@ pub fn start_native_preview() {
             let _ = child.wait();
         }
 
-        match Command::new("ffplay")
+        let bundled = format!("{}/bin/ffplay", project_root);
+        let cmd = if std::path::Path::new(&bundled).exists() {
+            bundled
+        } else {
+            "ffplay".to_string()
+        };
+
+        match Command::new(&cmd)
             .args(&[
                 "-f", "hevc",             // Force format to H.265/HEVC
                 "-fflags", "nobuffer",    // Reduce latency

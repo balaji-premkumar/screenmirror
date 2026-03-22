@@ -18,12 +18,14 @@ pub struct MobileMetrics {
     pub throughput_mbps: f64,
     pub encoding_latency_ms: u64,
     pub fps_actual: f64,
+    pub dropped_frames: u64,
 }
 
 pub static METRICS: Lazy<Mutex<MobileMetrics>> = Lazy::new(|| Mutex::new(MobileMetrics {
     throughput_mbps: 0.0,
     encoding_latency_ms: 0,
     fps_actual: 0.0,
+    dropped_frames: 0,
 }));
 
 #[frb(ignore)]
@@ -55,8 +57,14 @@ pub fn push_to_usb(data: Vec<u8>) -> bool {
         return true;
     }
     // Fallback to CircularBuffer if muxer isn't ready yet
-    let mut buffer = USB_BUFFER.lock().unwrap();
-    buffer.push(&data)
+    let mut buffer = USB_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    let success = buffer.push(&data);
+    if !success {
+        if let Ok(mut m) = METRICS.lock() {
+            m.dropped_frames += 1;
+        }
+    }
+    success
 }
 
 pub static LATEST_CONFIG: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
@@ -87,7 +95,7 @@ pub fn get_connection_state() -> String {
 }
 
 pub fn get_mobile_metrics() -> String {
-    let m = METRICS.lock().unwrap();
+    let m = METRICS.lock().unwrap_or_else(|e| e.into_inner());
     serde_json::to_string(&*m).unwrap_or_else(|_| "{}".to_string())
 }
 
