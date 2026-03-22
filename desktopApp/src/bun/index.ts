@@ -8,12 +8,17 @@ const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
 // ── Cross-platform library path resolution ──────────────────
 // On Linux/macOS: libmirror_backend.so / .dylib (with "lib" prefix)
 // On Windows: mirror_backend.dll (no prefix)
-const projectRoot = import.meta.dir.split(`${sep}build${sep}`)[0];
+const isDev = !import.meta.dir.includes(`${sep}build${sep}`);
+// In dev, projectRoot is two levels up from src/bun. In prod, it's the folder containing the bin/ folder.
+const projectRoot = isDev ? join(import.meta.dir, "..", "..") : join(import.meta.dir, "..");
+console.log("Enterprise: Project Root identified as:", projectRoot);
 const isWindows = process.platform === 'win32';
 const libName = isWindows
     ? `mirror_backend.${suffix}`
     : `libmirror_backend.${suffix}`;
-const libPath = join(projectRoot, "mirror_backend", "target", "release", libName);
+const libPath = isDev 
+    ? join(projectRoot, "mirror_backend", "target", "release", libName)
+    : join(projectRoot, "bin", libName); // Built app usually puts libs in bin/ or adjacent
 console.log("Enterprise: Loading Rust Library from:", libPath);
 
 const lib = dlopen(libPath, {
@@ -38,7 +43,7 @@ const lib = dlopen(libPath, {
   check_obs_plugin_installed: { args: [], returns: FFIType.i32 },
   check_ffplay_available: { args: [FFIType.cstring], returns: FFIType.i32 },
   get_obs_plugin_dir: { args: [], returns: FFIType.ptr },
-  install_obs_plugin: { args: [], returns: FFIType.i32 },
+  install_obs_plugin: { args: [FFIType.cstring], returns: FFIType.i32 },
   toggle_obs_feed: { args: [FFIType.i32], returns: FFIType.void },
 });
 
@@ -63,8 +68,8 @@ const rpc = defineElectrobunRPC('bun', {
             syncConfig: (config: any) => {
                 const jsonStr = JSON.stringify(config);
                 console.log("Enterprise RPC: Syncing configuration to Companion:", jsonStr);
-                const buf = Buffer.from(jsonStr + '\0');
-                const result = lib.symbols.sync_config(buf as unknown as Uint8Array);
+                const buf = new TextEncoder().encode(jsonStr + "\0");
+                const result = lib.symbols.sync_config(buf);
                 return { success: result === 0 };
             },
             disconnectDevice: () => {
@@ -73,8 +78,8 @@ const rpc = defineElectrobunRPC('bun', {
             },
             openNativePreview: async () => {
                 console.log("Enterprise RPC: Opening Native Preview (ffplay)");
-                const cwdBytes = new TextEncoder().encode(process.cwd() + "\0");
-                lib.symbols.open_native_preview(cwdBytes);
+                const rootBytes = new TextEncoder().encode(projectRoot + "\0");
+                lib.symbols.open_native_preview(rootBytes);
                 return 0;
             },
             toggleObsFeed: (data: any) => {
@@ -112,8 +117,8 @@ const rpc = defineElectrobunRPC('bun', {
             // Startup checks — called once when the loader screen mounts
             getStartupChecks: () => {
                 const driverOk = lib.symbols.check_driver_status() === 1;
-                const cwdBytes = new TextEncoder().encode(process.cwd() + "\0");
-                const ffplayOk = lib.symbols.check_ffplay_available(cwdBytes) === 1;
+                const rootBytes = new TextEncoder().encode(projectRoot + "\0");
+                const ffplayOk = lib.symbols.check_ffplay_available(rootBytes) === 1;
 
                 return {
                     driverOk,
@@ -125,7 +130,8 @@ const rpc = defineElectrobunRPC('bun', {
             },
             installObsPlugin: () => {
                 console.log("Enterprise RPC: Installing OBS plugin...");
-                const result = lib.symbols.install_obs_plugin();
+                const rootBytes = new TextEncoder().encode(projectRoot + "\0");
+                const result = lib.symbols.install_obs_plugin(rootBytes);
                 return { success: result === 0 };
             },
         }
