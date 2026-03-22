@@ -32,8 +32,14 @@ const lib = dlopen(libPath, {
   sync_config: { args: [FFIType.cstring], returns: FFIType.i32 },
   force_disconnect: { args: [], returns: FFIType.i32 },
   toggle_auto_reconnect: { args: [FFIType.i32], returns: FFIType.void },
-  stop_all_streams: { args: [], returns: FFIType.void },
-  open_native_preview: { args: [], returns: FFIType.i32 },
+  open_native_preview: { args: [FFIType.cstring], returns: FFIType.i32 },
+  // OBS & system detection
+  check_obs_installed: { args: [], returns: FFIType.i32 },
+  check_obs_plugin_installed: { args: [], returns: FFIType.i32 },
+  check_ffplay_available: { args: [FFIType.cstring], returns: FFIType.i32 },
+  get_obs_plugin_dir: { args: [], returns: FFIType.ptr },
+  install_obs_plugin: { args: [], returns: FFIType.i32 },
+  toggle_obs_feed: { args: [FFIType.i32], returns: FFIType.void },
 });
 
 // Setup Electrobun RPC 2.0
@@ -66,33 +72,25 @@ const rpc = defineElectrobunRPC('bun', {
                 return lib.symbols.force_disconnect();
             },
             openNativePreview: async () => {
-                console.log("Enterprise RPC: Opening Native Preview Window");
-                // Option 1: Launch the high-speed WGPU native window
-                lib.symbols.open_native_preview();
-                
-                // Option 2: Also open an Electrobun window for a separate UI view if needed
-                const previewUrl = await getMainViewUrl();
-                new BrowserWindow({
-                    title: "Mirror Stream - Live Preview",
-                    url: previewUrl,
-                    frame: { width: 960, height: 540, x: 300, y: 300 }
-                });
+                console.log("Enterprise RPC: Opening Native Preview (ffplay)");
+                const cwdBytes = new TextEncoder().encode(process.cwd() + "\0");
+                lib.symbols.open_native_preview(cwdBytes);
                 return 0;
             },
-            toggleObsFeed: (data: { enabled: boolean }) => {
+            toggleObsFeed: (data: any) => {
                 console.log(`Enterprise RPC: OBS Feed toggled to ${data.enabled}`);
-                // In a production app, we'd pass this flag to the Rust backend 
-                // to selectively enable/disable shared memory writes.
+                lib.symbols.toggle_obs_feed(data.enabled ? 1 : 0);
                 return { success: true };
             },
-            toggleAutoReconnect: (data: { enabled: boolean }) => {
+            toggleAutoReconnect: (data: any) => {
                 console.log(`Enterprise RPC: Auto-reconnect toggled to ${data.enabled}`);
                 lib.symbols.toggle_auto_reconnect(data.enabled ? 1 : 0);
                 return { success: true };
             },
             // Polling endpoint — View requests telemetry from Bun
             getStatusUpdate: () => {
-                const devices = readCString(lib.symbols.get_devices()).split(',').filter(s => s.length > 0);
+                const devString = readCString(lib.symbols.get_devices());
+                const devices = devString ? devString.split(',').filter(s => s.trim().length > 0) : [];
                 const newLogsJson = readCString(lib.symbols.get_new_logs());
                 let newLogs: any[] = [];
                 try { newLogs = JSON.parse(newLogsJson); } catch (e) { }
@@ -110,7 +108,26 @@ const rpc = defineElectrobunRPC('bun', {
                     metrics,
                     driverOk
                 };
-            }
+            },
+            // Startup checks — called once when the loader screen mounts
+            getStartupChecks: () => {
+                const driverOk = lib.symbols.check_driver_status() === 1;
+                const cwdBytes = new TextEncoder().encode(process.cwd() + "\0");
+                const ffplayOk = lib.symbols.check_ffplay_available(cwdBytes) === 1;
+
+                return {
+                    driverOk,
+                    ffplayOk,
+                    obsInstalled: lib.symbols.check_obs_installed() === 1,
+                    obsPluginInstalled: lib.symbols.check_obs_plugin_installed() === 1,
+                    obsPluginDir: readCString(lib.symbols.get_obs_plugin_dir()),
+                };
+            },
+            installObsPlugin: () => {
+                console.log("Enterprise RPC: Installing OBS plugin...");
+                const result = lib.symbols.install_obs_plugin();
+                return { success: result === 0 };
+            },
         }
     }
 });
@@ -145,9 +162,11 @@ new BrowserWindow({
 
 function readCString(ptr: any): string {
     if (!ptr) return "";
-    const s = new CString(ptr).toString();
-    lib.symbols.free_string(ptr);
-    return s;
+    try {
+        return new CString(ptr).toString();
+    } finally {
+        lib.symbols.free_string(ptr);
+    }
 }
 
 lib.symbols.init_mirror(1920, 1080);

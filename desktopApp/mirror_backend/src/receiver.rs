@@ -1,5 +1,5 @@
 use rusb::{Context as RusbContext, DeviceHandle, UsbContext};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::push_packet;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
@@ -74,8 +74,8 @@ pub fn log_event(level: &str, module: &str, thread: &str, message: &str) {
 
 /// Returns only NEW logs since the last call, enabling incremental/live updates
 pub fn get_new_logs() -> Vec<LogEntry> {
-    let logs = LOG_BUFFER.lock().unwrap();
-    let mut cursor = LOG_CURSOR.lock().unwrap();
+    let logs = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cursor = LOG_CURSOR.lock().unwrap_or_else(|e| e.into_inner());
     let start = *cursor;
     let end = logs.len();
     if start >= end {
@@ -140,11 +140,8 @@ fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), r
 struct StreamingActiveGuard;
 impl Drop for StreamingActiveGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = STREAMING_ACTIVE.lock() {
-            *active = false;
-        } else if let Err(e) = STREAMING_ACTIVE.lock() {
-            *e.into_inner() = false;
-        }
+        let mut active = STREAMING_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        *active = false;
         log_event("WARN", "USB", "streaming", "Session guard dropped: Link state reset.");
     }
 }
@@ -216,8 +213,8 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
 
         let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer for high-bitrate video
         let mut demuxer = crate::demuxer::Demuxer::new();
-        let mut idle_seconds = 0;
-
+        let mut last_activity = Instant::now();
+        let timeout_duration = Duration::from_millis(1000);
         loop {
             // Flush pending config commands FIRST, so "stop" commands reach the mobile device
             if let Ok(mut pending) = PENDING_CONFIG.lock() {
@@ -241,9 +238,9 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
             }
 
             // Stream data from USB
-            match handle.read_bulk(endpoint_in, &mut buf, Duration::from_millis(1000)) {
+            match handle.read_bulk(endpoint_in, &mut buf, timeout_duration) {
                 Ok(len) if len > 0 => {
-                    idle_seconds = 0;
+                    last_activity = Instant::now();
                     let frames = demuxer.feed(&buf[..len]);
                     for frame in frames {
                         if matches!(frame.frame_type, crate::demuxer::FrameType::Video) {
@@ -251,10 +248,14 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    if last_activity.elapsed() >= Duration::from_secs(5) {
+                        log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
+                        break;
+                    }
+                }
                 Err(rusb::Error::Timeout) => {
-                    idle_seconds += 1;
-                    if idle_seconds >= 5 {
+                    if last_activity.elapsed() >= Duration::from_secs(5) {
                         log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
                         break;
                     }

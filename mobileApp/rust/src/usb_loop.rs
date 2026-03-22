@@ -57,13 +57,18 @@ impl Drop for MetricsGuard {
 pub fn start_usb_loop(fd: i32) {
     // Guard against multiple starts
     {
-        let mut active = USB_ACTIVE.lock().unwrap();
+        let mut active = USB_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         if *active { return; }
         *active = true;
     }
 
     {
-        let mut h = USB_HANDLE.lock().unwrap();
+        let mut h = USB_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old_fd) = *h {
+            if old_fd != fd {
+                unsafe { libc::close(old_fd); }
+            }
+        }
         *h = Some(fd);
     }
 
@@ -75,7 +80,7 @@ pub fn start_usb_loop(fd: i32) {
         loop {
             // Check if we should still be active
             {
-                let active = USB_ACTIVE.lock().unwrap();
+                let active = USB_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
                 if !*active { break; }
             }
 
@@ -97,6 +102,8 @@ pub fn start_usb_loop(fd: i32) {
                 break;
             }
         }
+        let mut active = USB_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        *active = false;
     });
 
     std::thread::spawn(move || {
@@ -105,7 +112,7 @@ pub fn start_usb_loop(fd: i32) {
         let muxer = Arc::new(Mutex::new(Muxer::new(frame_tx)));
 
         {
-            let mut global = GLOBAL_MUXER.lock().unwrap();
+            let mut global = GLOBAL_MUXER.lock().unwrap_or_else(|e| e.into_inner());
             *global = Some(muxer.clone());
         }
 
@@ -153,7 +160,7 @@ pub fn start_usb_loop(fd: i32) {
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let active = USB_ACTIVE.lock().unwrap();
+                    let active = USB_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
                     if !*active { break; }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -164,12 +171,17 @@ pub fn start_usb_loop(fd: i32) {
         }
 
         {
-            let mut global = GLOBAL_MUXER.lock().unwrap();
+            let mut global = GLOBAL_MUXER.lock().unwrap_or_else(|e| e.into_inner());
             *global = None;
         }
-        unsafe { libc::close(fd); }
         {
-            let mut active = USB_ACTIVE.lock().unwrap();
+            let mut h = USB_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(stored_fd) = h.take() {
+                unsafe { libc::close(stored_fd); }
+            }
+        }
+        {
+            let mut active = USB_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
             *active = false;
         }
         set_state(AoaState::Idle);
