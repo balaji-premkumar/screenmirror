@@ -489,8 +489,7 @@ static void mirror_video_tick(void *data, float seconds)
         ctx->current_fmt = format;
         ctx->last_w      = w;
         ctx->last_h      = h;
-        /* Notify OBS that the source canvas size has changed */
-        obs_source_update_size(ctx->source);
+        /* OBS queries size via mirror_get_width/height callbacks; no explicit notification needed */
         blog(LOG_INFO, "[Mirror Source] Resolution: %ux%u fmt=%u", w, h, fmt);
     }
 
