@@ -5,15 +5,25 @@ use once_cell::sync::Lazy;
 /// Manages a raw POSIX shared memory segment (`/mirror_obs_feed`) that an OBS
 /// Studio source plugin can map and read decoded video frames from.
 ///
-/// The layout is intentionally simple and crate-independent so that the
-/// companion C plugin can open the same segment with a plain `shm_open`+`mmap`.
+/// SHM layout (64-byte header, cache-line aligned, then pixel data):
 ///
-/// Memory layout:
-///   [24B FrameHeader] [pixel data up to MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT * 4 bytes]
+///   Offset  Size  Field
+///   ------  ----  -----
+///     0      4    magic  "MIRR"
+///     4      4    seq    seqlock counter (odd = write in progress, even = ready)
+///     8      4    width
+///    12      4    height
+///    16      4    format  0=BGRA 1=NV12 2=I420
+///    20      4    _pad
+///    24      8    timestamp
+///    32      8    frame_count  monotonically increasing
+///    40     24    _pad2
+///    64      *    pixel data (up to MAX_PIXEL_DATA bytes)
 ///
-/// The SHM is allocated large enough for any frame up to 4K. The FrameHeader
-/// contains the actual width/height so the consumer knows how much data to read.
-use std::sync::atomic::{AtomicBool, Ordering};
+/// Synchronisation protocol (seqlock):
+///   Writer: store seq|1 (odd)  →  write all data  →  fence(Release)  →  store seq+2 (even)
+///   Reader: load seq1; if odd skip; copy data; fence(Acquire); load seq2; if seq1≠seq2 discard
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 use std::sync::Mutex;
 
 // ── Toggle ──────────────────────────────────────────────────
@@ -49,6 +59,22 @@ unsafe impl Sync for ObsShmem {}
 static OBS_SHMEM: Lazy<Mutex<Option<ObsShmem>>> = Lazy::new(|| Mutex::new(None));
 static AUDIO_SHMEM: Lazy<Mutex<Option<ObsShmem>>> = Lazy::new(|| Mutex::new(None));
 
+/// Monotonically increasing frame counter written into every SHM header.
+static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Byte offset from the start of the SHM segment to the first pixel byte.
+/// The header occupies a full 64-byte cache line.
+const SHM_PIXEL_OFFSET: usize = 64;
+
+/// Byte offsets of header fields (must match `struct shm_header` in mirror_source.c)
+const OFF_MAGIC:       usize = 0;
+const OFF_SEQ:         usize = 4;
+const OFF_WIDTH:       usize = 8;
+const OFF_HEIGHT:      usize = 12;
+const OFF_FORMAT:      usize = 16;
+const OFF_TIMESTAMP:   usize = 24;
+const OFF_FRAME_COUNT: usize = 32;
+
 #[cfg(target_os = "linux")]
 const SHM_NAME: &[u8] = b"/mirror_obs_feed\0";
 
@@ -75,10 +101,8 @@ const MAX_PIXEL_DATA: usize = MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT * 4;
 pub fn init(width: u32, height: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        let header_size = std::mem::size_of::<crate::FrameHeader>();
-        // Allocate enough for any frame up to MAX resolution, not just the init dimensions.
-        // This prevents overflow when the phone sends portrait or higher-res frames.
-        let total = header_size + MAX_PIXEL_DATA;
+        // Allocate one full 64-byte header + enough pixel room for any frame up to 4K.
+        let total = SHM_PIXEL_OFFSET + MAX_PIXEL_DATA;
 
         unsafe {
             // Video SHM
@@ -88,7 +112,10 @@ pub fn init(width: u32, height: u32) -> bool {
                 libc::ftruncate(fd, total as libc::off_t);
                 let ptr = libc::mmap(std::ptr::null_mut(), total, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
                 if ptr != libc::MAP_FAILED {
+                    // Zero the entire segment (sets seq=0, magic=0x00000000)
                     std::ptr::write_bytes(ptr as *mut u8, 0, total);
+                    // Do NOT write magic yet — it is written as part of the first
+                    // seqlock-protected write so the reader can't see partial headers.
                     if let Ok(mut shmem) = OBS_SHMEM.lock() {
                         *shmem = Some(ObsShmem { ptr: ptr as *mut u8, size: total, fd });
                     }
@@ -146,16 +173,26 @@ pub fn write_audio(samples: &[f32]) {
                     head = (head + 1) % AUDIO_BUFFER_SAMPLES;
                 }
                 
-                // Write head atomically (or close enough for our lock-free needs)
-                std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::Release);
+                // Full CPU memory barrier — compiler_fence is NOT sufficient on ARM.
+                fence(Ordering::Release);
                 (*hdr).head = head as u32;
             }
         }
     }
 }
 
-/// Write a decoded frame to the OBS shared memory segment.
-/// Called from `write_frame_to_obs()` in lib.rs when the OBS feed is enabled.
+/// Write a decoded frame to the OBS shared memory segment using a seqlock.
+///
+/// Protocol:
+///   1. Read current `seq` (must be even — previous write complete).
+///   2. Store `seq | 1` (odd)  → signals reader: write in progress.
+///   3. fence(Release) — all subsequent writes visible after the seq store.
+///   4. Write pixel data + header fields.
+///   5. fence(Release) — all writes above committed before step 6.
+///   6. Store `seq + 2` (even) → signals reader: frame ready.
+///
+/// The reader checks seq before and after copying; if they differ (or if odd)
+/// the frame is discarded without tearing being shown.
 pub fn write_frame(data: *const u8, len: usize, width: u32, height: u32, format: u32, timestamp: u64) {
     if !is_enabled() {
         return;
@@ -163,31 +200,56 @@ pub fn write_frame(data: *const u8, len: usize, width: u32, height: u32, format:
 
     if let Ok(shmem) = OBS_SHMEM.lock() {
         if let Some(ref shm) = *shmem {
-            let header_size = std::mem::size_of::<crate::FrameHeader>();
             let pixel_data_needed = (width as usize) * (height as usize) * 4;
-            let required = header_size + pixel_data_needed;
 
             // Safety: only write if the frame fits in our pre-allocated SHM
-            if required > shm.size {
-                return; // Frame too large, skip it rather than overflow
+            if SHM_PIXEL_OFFSET + pixel_data_needed > shm.size {
+                return;
             }
 
+            let frame_count = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+
             unsafe {
-                let header = crate::FrameHeader {
-                    magic: *b"MIRR",
-                    width,
-                    height,
-                    format,
-                    timestamp,
-                };
-                std::ptr::copy_nonoverlapping(
-                    &header as *const crate::FrameHeader as *const u8,
-                    shm.ptr,
-                    header_size,
-                );
-                let data_ptr = shm.ptr.add(header_size);
+                // ── Seqlock: begin write ──────────────────────────────────
+                // The seq field lives at byte offset OFF_SEQ (4) in the SHM.
+                // We cast it to AtomicU32 — safe because SHM is page-aligned
+                // (≥4096 bytes), so offset 4 is always 4-byte aligned.
+                let seq_ptr = &*(shm.ptr.add(OFF_SEQ) as *const std::sync::atomic::AtomicU32);
+
+                // Load current generation (expected to be even)
+                let seq = seq_ptr.load(Ordering::Relaxed);
+
+                // Mark write in-progress (odd value)
+                seq_ptr.store(seq.wrapping_add(1), Ordering::Release);
+
+                // Full CPU barrier: no subsequent write can be reordered before this point
+                fence(Ordering::Release);
+
+                // ── Write pixel data (the large copy) ────────────────────
+                let pixels_ptr = shm.ptr.add(SHM_PIXEL_OFFSET);
                 let copy_len = len.min(pixel_data_needed);
-                std::ptr::copy_nonoverlapping(data, data_ptr, copy_len);
+                std::ptr::copy_nonoverlapping(data, pixels_ptr, copy_len);
+
+                // ── Write header metadata fields ─────────────────────────
+                // magic at OFF_MAGIC (0)
+                std::ptr::copy_nonoverlapping(b"MIRR".as_ptr(), shm.ptr.add(OFF_MAGIC), 4);
+                // width at OFF_WIDTH (8)
+                std::ptr::write(shm.ptr.add(OFF_WIDTH)  as *mut u32, width);
+                // height at OFF_HEIGHT (12)
+                std::ptr::write(shm.ptr.add(OFF_HEIGHT) as *mut u32, height);
+                // format at OFF_FORMAT (16)
+                std::ptr::write(shm.ptr.add(OFF_FORMAT) as *mut u32, format);
+                // timestamp at OFF_TIMESTAMP (24)
+                std::ptr::write(shm.ptr.add(OFF_TIMESTAMP)   as *mut u64, timestamp);
+                // frame_count at OFF_FRAME_COUNT (32)
+                std::ptr::write(shm.ptr.add(OFF_FRAME_COUNT) as *mut u64, frame_count);
+
+                // ── Seqlock: finish write ─────────────────────────────────
+                // Barrier ensures ALL writes above are visible before seq becomes even.
+                fence(Ordering::Release);
+
+                // Mark write complete (next even generation)
+                seq_ptr.store(seq.wrapping_add(2), Ordering::Release);
             }
         }
     }
@@ -298,7 +360,9 @@ pub fn get_obs_plugin_dir() -> Option<String> {
     None
 }
 
-const PLUGIN_VERSION: &str = "1.1.0";
+/// Bump this whenever the SHM header layout changes — forces old plugin binaries
+/// to be replaced on next app launch.
+const PLUGIN_VERSION: &str = "1.2.0";
 
 /// Check whether our OBS plugin is already installed and up to date.
 pub fn check_plugin_installed() -> bool {

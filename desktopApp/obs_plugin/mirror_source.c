@@ -7,30 +7,61 @@
 #include <unistd.h>
 #include <string.h>
 #include <pthread.h>
+#include <stddef.h>   /* offsetof */
+#include <stdint.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Mirror Team")
 OBS_MODULE_USE_DEFAULT_LOCALE("mirror-source", "en-US")
 
-/* Must match the Rust `FrameHeader` exactly */
-#define SHM_NAME "/mirror_obs_feed"
-#define AUDIO_SHM_NAME "/mirror_obs_audio"
+/* ── Shared memory header — MUST match obs_feed.rs exactly ────────────────
+ *
+ *  Offset  Size  Field
+ *  ------  ----  -----
+ *    0      4    magic        "MIRR" (written inside seqlock window)
+ *    4      4    seq          seqlock counter  (odd=write-in-progress, even=ready)
+ *    8      4    width
+ *   12      4    height
+ *   16      4    format       0=BGRA  1=NV12  2=I420
+ *   20      4    _pad
+ *   24      8    timestamp
+ *   32      8    frame_count  monotonically increasing
+ *   40     24    _pad2
+ *   64      *    pixel data   (up to 3840 * 2160 * 4 bytes)
+ */
+#define SHM_NAME         "/mirror_obs_feed"
+#define AUDIO_SHM_NAME   "/mirror_obs_audio"
+#define HEADER_SIZE      64          /* must equal SHM_PIXEL_OFFSET in obs_feed.rs */
+#define MAX_PIXEL_DATA   (3840 * 2160 * 4)
 #define AUDIO_BUFFER_SAMPLES 96000
 
-struct frame_header {
-    char     magic[4];
-    uint32_t width;
-    uint32_t height;
-    uint32_t format; // 0 = BGRA, 1 = NV12, 2 = I420
-    uint64_t timestamp;
+struct shm_header {
+    char     magic[4];       /* offset  0 */
+    uint32_t seq;            /* offset  4  — seqlock counter              */
+    uint32_t width;          /* offset  8                                 */
+    uint32_t height;         /* offset 12                                 */
+    uint32_t format;         /* offset 16  — 0=BGRA 1=NV12 2=I420        */
+    uint32_t _pad;           /* offset 20                                 */
+    uint64_t timestamp;      /* offset 24                                 */
+    uint64_t frame_count;    /* offset 32                                 */
+    uint8_t  _pad2[24];      /* offset 40  — pad to 64-byte cache line   */
+    /* pixel data follows at offset 64 */
 };
+
+/* Compile-time layout verification — catches mismatches between Rust and C */
+_Static_assert(sizeof(struct shm_header) == 64,   "shm_header must be 64 bytes");
+_Static_assert(offsetof(struct shm_header, seq)         ==  4, "seq offset wrong");
+_Static_assert(offsetof(struct shm_header, width)       ==  8, "width offset wrong");
+_Static_assert(offsetof(struct shm_header, height)      == 12, "height offset wrong");
+_Static_assert(offsetof(struct shm_header, format)      == 16, "format offset wrong");
+_Static_assert(offsetof(struct shm_header, timestamp)   == 24, "timestamp offset wrong");
+_Static_assert(offsetof(struct shm_header, frame_count) == 32, "frame_count offset wrong");
 
 struct audio_shm_header {
     char     magic[4];
     uint32_t head;
 };
 
-#define HEADER_SIZE sizeof(struct frame_header)
 #define AUDIO_HEADER_SIZE sizeof(struct audio_shm_header)
 #define AUDIO_SHM_SIZE (AUDIO_HEADER_SIZE + (AUDIO_BUFFER_SAMPLES * sizeof(float)))
 
@@ -39,13 +70,19 @@ struct mirror_source {
     char         *shm_name;
     bool          advanced;
 
-    /* Video Shared memory */
+    /* Video shared memory */
     uint8_t      *shmem_ptr;
     size_t        shmem_size;
     int           shmem_fd;
     bool          shmem_open;
 
-    /* Audio Shared memory */
+    /* Local pixel buffer — allocated once in mirror_create at max 4K size.
+     * The seqlock reader copies SHM pixel data here before uploading to GPU,
+     * so the GPU never reads from a potentially torn SHM region. */
+    uint8_t      *pixel_buf;
+    size_t        pixel_buf_size;
+
+    /* Audio shared memory */
     uint8_t      *audio_shm_ptr;
     int           audio_shm_fd;
     bool          audio_shm_open;
@@ -55,6 +92,7 @@ struct mirror_source {
     uint32_t      tex_width;
     uint32_t      tex_height;
     uint64_t      last_timestamp;
+    uint64_t      last_frame_count;
     uint32_t      last_w;
     uint32_t      last_h;
     enum gs_color_format current_fmt;
@@ -227,21 +265,33 @@ static const char *mirror_get_name(void *unused)
 static void *mirror_create(obs_data_t *settings, obs_source_t *source)
 {
     struct mirror_source *ctx = bzalloc(sizeof(*ctx));
-    ctx->source     = source;
-    ctx->shmem_fd   = -1;
-    ctx->shmem_open = false;
-    ctx->audio_shm_fd = -1;
-    ctx->audio_shm_open = false;
-    ctx->audio_tail = 0;
-    ctx->texture    = NULL;
-    ctx->last_timestamp = 0;
+    ctx->source          = source;
+    ctx->shmem_fd        = -1;
+    ctx->shmem_open      = false;
+    ctx->audio_shm_fd    = -1;
+    ctx->audio_shm_open  = false;
+    ctx->audio_tail      = 0;
+    ctx->texture         = NULL;
+    ctx->last_timestamp  = 0;
+    ctx->last_frame_count = 0;
+
+    /* Allocate a permanent local pixel buffer large enough for any frame up to 4K.
+     * This avoids per-frame heap allocation and allows the seqlock reader to copy
+     * out of SHM before touching the GPU. */
+    ctx->pixel_buf_size = MAX_PIXEL_DATA;
+    ctx->pixel_buf      = bmalloc(ctx->pixel_buf_size);
+    if (!ctx->pixel_buf) {
+        blog(LOG_ERROR, "[Mirror Source] Failed to allocate pixel buffer (%zu bytes)", ctx->pixel_buf_size);
+        bfree(ctx);
+        return NULL;
+    }
 
     mirror_update(ctx, settings);
 
     ctx->thread_active = true;
     pthread_create(&ctx->audio_thread, NULL, audio_thread, ctx);
 
-    blog(LOG_INFO, "[Mirror Source] Source created");
+    blog(LOG_INFO, "[Mirror Source] Source created (pixel_buf=%zu bytes)", ctx->pixel_buf_size);
     return ctx;
 }
 
@@ -260,6 +310,12 @@ static void mirror_destroy(void *data)
     obs_leave_graphics();
 
     close_shmem(ctx);
+
+    if (ctx->pixel_buf) {
+        bfree(ctx->pixel_buf);
+        ctx->pixel_buf = NULL;
+    }
+
     if (ctx->shm_name)
         bfree(ctx->shm_name);
     bfree(ctx);
@@ -346,58 +402,110 @@ static void mirror_video_tick(void *data, float seconds)
     if (ctx->shmem_size < HEADER_SIZE)
         return;
 
-    const struct frame_header *hdr = (const struct frame_header *)ctx->shmem_ptr;
+    if (!ctx->pixel_buf)
+        return;
 
-    if (memcmp(hdr->magic, "MIRR", 4) != 0) {
+    const struct shm_header *hdr = (const struct shm_header *)ctx->shmem_ptr;
+
+    /* ── Seqlock reader ────────────────────────────────────────────────────
+     *
+     *  We do NOT spin: if a write is in-progress we skip this tick entirely.
+     *  OBS will call us again in ~16 ms, so at worst we display the previous
+     *  frame for one extra frame period — far better than tearing.
+     *
+     *  1. Load seq atomically (acquire).  Must be even (write complete).
+     *  2. Copy all fields we care about into local variables and pixel_buf.
+     *  3. Acquire fence.
+     *  4. Load seq again.  If it changed, the writer overwrote us — discard.
+     */
+    uint32_t seq1 = __atomic_load_n(&hdr->seq, __ATOMIC_ACQUIRE);
+    if (seq1 & 1) {
+        /* Writer is currently updating the buffer — skip this tick */
         return;
     }
 
-    uint32_t w = hdr->width;
-    uint32_t h = hdr->height;
-    uint64_t ts = hdr->timestamp;
+    /* Read header fields into locals while seq1 is valid */
+    char     magic[4];
+    uint32_t w, h, fmt;
+    uint64_t ts, frame_count;
 
+    memcpy(magic, hdr->magic, 4);
+    w           = hdr->width;
+    h           = hdr->height;
+    fmt         = hdr->format;
+    ts          = hdr->timestamp;
+    frame_count = hdr->frame_count;
+
+    /* Sanity check before computing pixel_data_size */
+    if (memcmp(magic, "MIRR", 4) != 0)
+        return;
     if (w == 0 || h == 0 || w > 7680 || h > 4320)
         return;
 
-    if (ts == ctx->last_timestamp && ctx->texture)
-        return;
-
-    /* Always BGRA in this revision */
     size_t pixel_data_size = (size_t)w * (size_t)h * 4;
-    
+
+    /* Check SHM is large enough (re-open if needed to pick up a resize) */
     if (ctx->shmem_size < HEADER_SIZE + pixel_data_size) {
-        /* SHM was mapped with an older, smaller size. Re-open to pick up the larger allocation. */
         close_shmem(ctx);
         if (!try_open_shmem(ctx))
             return;
-        /* Re-check after remap */
         if (ctx->shmem_size < HEADER_SIZE + pixel_data_size)
             return;
-        /* Re-read header pointer after remap */
-        hdr = (const struct frame_header *)ctx->shmem_ptr;
+        /* Re-point hdr after remap */
+        hdr = (const struct shm_header *)ctx->shmem_ptr;
     }
 
-    const uint8_t *pixels = ctx->shmem_ptr + HEADER_SIZE;
+    /* Skip if frame hasn't advanced since last tick */
+    if (frame_count == ctx->last_frame_count && ctx->texture)
+        return;
 
+    /* Copy pixel data into our local buffer while still in the seqlock window */
+    if (pixel_data_size > ctx->pixel_buf_size)
+        return; /* Should never happen — pixel_buf is sized for 4K */
+
+    const uint8_t *shm_pixels = ctx->shmem_ptr + HEADER_SIZE;
+    memcpy(ctx->pixel_buf, shm_pixels, pixel_data_size);
+
+    /* ── Seqlock validation ─────────────────────────────────────────────── */
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    uint32_t seq2 = __atomic_load_n(&hdr->seq, __ATOMIC_ACQUIRE);
+    if (seq1 != seq2) {
+        /* Writer started (or completed another write) while we were copying.
+         * Our local copy may be torn — discard this frame, keep last texture. */
+        blog(LOG_DEBUG, "[Mirror Source] Seqlock retry: seq %u -> %u (frame discarded)", seq1, seq2);
+        return;
+    }
+
+    /* ── All good: upload coherent frame to GPU ─────────────────────────── */
     obs_enter_graphics();
     enum gs_color_format format = ctx->use_unorm ? GS_BGRA_UNORM : GS_BGRA;
-    
+
     if (!ctx->texture || ctx->tex_width != w || ctx->tex_height != h || ctx->current_fmt != format) {
         if (ctx->texture)
             gs_texture_destroy(ctx->texture);
-        ctx->texture = gs_texture_create(w, h, format, 1, NULL, GS_DYNAMIC);
-        ctx->tex_width  = w;
-        ctx->tex_height = h;
+        ctx->texture     = gs_texture_create(w, h, format, 1, NULL, GS_DYNAMIC);
+        ctx->tex_width   = w;
+        ctx->tex_height  = h;
         ctx->current_fmt = format;
+        ctx->last_w      = w;
+        ctx->last_h      = h;
+        /* Notify OBS that the source canvas size has changed */
+        obs_source_update_size(ctx->source);
+        blog(LOG_INFO, "[Mirror Source] Resolution: %ux%u fmt=%u", w, h, fmt);
     }
 
-    gs_texture_set_image(ctx->texture, pixels, w * 4, false);
+    /* Upload from local pixel_buf — the GPU never reads directly from SHM */
+    gs_texture_set_image(ctx->texture, ctx->pixel_buf, w * 4, false);
     obs_leave_graphics();
 
-    ctx->last_timestamp = ts;
-    ctx->last_w = w;
-    ctx->last_h = h;
+    ctx->last_timestamp   = ts;
+    ctx->last_frame_count = frame_count;
+    ctx->last_w           = w;
+    ctx->last_h           = h;
+
+    UNUSED_PARAMETER(fmt);
 }
+
 
 static void mirror_video_render(void *data, gs_effect_t *effect)
 {
