@@ -21,8 +21,20 @@ impl H265Decoder {
     pub fn new() -> Result<Self, ffmpeg::Error> {
         ffmpeg::init()?;
 
-        let codec =
-            ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC).ok_or(ffmpeg::Error::DecoderNotFound)?;
+        // Attempt to find a hardware-accelerated decoder first, fallback to software
+        let codec = ffmpeg::decoder::find_by_name("hevc_videotoolbox")
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))
+            .or_else(|| ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC))
+            .ok_or(ffmpeg::Error::DecoderNotFound)?;
+        
+        log_event(
+            "INFO",
+            "DECODER",
+            "init",
+            &format!("Selected HEVC decoder: {}", codec.name()),
+        );
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
 

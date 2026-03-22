@@ -170,7 +170,30 @@ pub fn start_native_preview(_project_root: &str) {
                     }
                     
                     let _ = canvas.clear();
-                    let _ = canvas.copy(tex, None, None);
+                    
+                    let (win_w, win_h) = canvas.output_size().unwrap_or((1280, 720));
+                    let src_ratio = frame.width as f32 / frame.height as f32;
+                    let dst_ratio = win_w as f32 / win_h as f32;
+                    
+                    let mut dst_w = win_w;
+                    let mut dst_h = win_h;
+                    
+                    if src_ratio > dst_ratio {
+                        // Source is wider than destination (pillarbox top/bottom)
+                        dst_h = (win_w as f32 / src_ratio) as u32;
+                    } else {
+                        // Source is taller than destination (pillarbox left/right)
+                        dst_w = (win_h as f32 * src_ratio) as u32;
+                    }
+                    
+                    let dst_rect = sdl2::rect::Rect::new(
+                        ((win_w - dst_w) / 2) as i32,
+                        ((win_h - dst_h) / 2) as i32,
+                        dst_w,
+                        dst_h,
+                    );
+                    
+                    let _ = canvas.copy(tex, None, dst_rect);
                     canvas.present();
                 }
                 
