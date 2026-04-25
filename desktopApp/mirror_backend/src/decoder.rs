@@ -24,10 +24,11 @@ impl H265Decoder {
         ffmpeg::init()?;
 
         // Attempt to find a hardware-accelerated decoder first, fallback to software
-        let codec = ffmpeg::decoder::find_by_name("hevc_videotoolbox")
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))
+        let codec = ffmpeg::decoder::find_by_name("hevc_videotoolbox") // macOS
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))     // Intel (Windows/Linux)
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))   // NVIDIA (Windows/Linux)
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_d3d11va")) // Windows DX11
+            .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))   // Linux VAAPI
             .or_else(|| ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC))
             .ok_or(ffmpeg::Error::DecoderNotFound)?;
 

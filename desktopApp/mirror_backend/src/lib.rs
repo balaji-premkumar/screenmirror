@@ -16,6 +16,9 @@ pub mod renderer;
 pub mod shared_mem;
 pub mod video_processing;
 
+#[cfg(target_os = "windows")]
+pub mod shm_win;
+
 #[repr(C)]
 pub struct FrameHeader {
     pub magic: [u8; 4],
