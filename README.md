@@ -1,117 +1,113 @@
-# ScreenMirror
+# ScreenMirror 📱💻
 
-**ScreenMirror** is a high-performance, low-latency screen and audio mirroring solution designed to stream your Android device's screen to your Desktop (Linux/Windows) over USB. Unlike traditional solutions that rely on ADB or network connections, ScreenMirror utilizes the **Android Open Accessory (AOA) protocol**, providing a robust, driver-less (on Linux), and extremely low-latency connection.
+[![CI - Desktop](https://github.com/balaji-premkumar/screenmirror/actions/workflows/desktop.yml/badge.svg)](https://github.com/balaji-premkumar/screenmirror/actions/workflows/desktop.yml)
+[![CI - Mobile](https://github.com/balaji-premkumar/screenmirror/actions/workflows/mobile.yml/badge.svg)](https://github.com/balaji-premkumar/screenmirror/actions/workflows/mobile.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🚀 Key Features
+**ScreenMirror** is a high-performance, ultra-low-latency screen and audio mirroring solution. It allows you to stream your Android device's screen and system audio to your Desktop (Linux/Windows/macOS) over a standard USB cable.
 
-- **USB-AOA Protocol**: High-reliability streaming over USB without requiring ADB or developer mode.
-- **Ultra-Low Latency**: Optimized pipeline using Rust for core logic and FFmpeg for hardware-accelerated decoding.
-- **High-Performance Rendering**: Native GPU rendering on the desktop using **WGPU**.
-- **Audio Mirroring**: Real-time audio streaming from Android to Desktop (powered by Oboe).
-- **Cross-Platform Receiver**: Desktop application built with **Electrobun** (Bun + React), supporting Linux and Windows.
-- **Real-time Diagnostics**: The mobile companion app provides live metrics for FPS, throughput, and encoding latency.
-- **Automated Permissions**: Simple setup scripts for Linux udev rules and Windows driver management.
+By leveraging the **Android Open Accessory (AOA) protocol**, ScreenMirror provides a robust, "driver-less" connection that bypasses the limitations and overhead of ADB, providing a near-native experience for gaming and high-fidelity monitoring.
+
+---
+
+## ✨ Features
+
+- **🚀 Ultra-Low Latency**: End-to-end latency optimized via Rust core and FFmpeg hardware acceleration.
+- **🔗 USB-AOA Protocol**: Pure USB streaming without requiring ADB, Developer Options (after initial setup), or network dependency.
+- **🔊 Audio Mirroring**: Real-time system audio streaming powered by high-performance Oboe (Android) and CPAL (Desktop).
+- **🎥 OBS Studio Integration**: Direct-to-SHM feed for OBS, enabling high-quality recording and streaming without capture cards.
+- **📈 Live Diagnostics**: Real-time telemetry including FPS, throughput (Mbps), and decoder health.
+- **🖥️ Cross-Platform**: Native desktop receiver built with Electrobun (Bun + React) supporting Linux, Windows, and macOS.
 
 ---
 
 ## 🏗️ Technical Architecture
 
-### Desktop Receiver (`desktopApp`)
-- **Frontend**: React 18, Tailwind CSS, Vite.
-- **Runtime**: [Electrobun](https://electrobun.dev/) (A lightweight, high-performance alternative to Electron using Bun).
-- **Core Engine (`mirror_backend`)**: 
-  - Written in **Rust**.
-  - **FFmpeg**: Hardware-accelerated video decoding (H.264/H.265).
-  - **WGPU**: Cross-platform, native GPU rendering.
-  - **rusb**: High-level USB communication.
+### Desktop Receiver (`/desktopApp`)
+- **Frontend**: React 18 + Tailwind CSS.
+- **Runtime**: [Electrobun](https://electrobun.dev/) (High-performance Bun-based native shell).
+- **Core (`mirror_backend`)**: 
+  - **Rust**: High-concurrency packet processing and demuxing.
+  - **FFmpeg**: Hardware-accelerated H.265/HEVC decoding.
+  - **SDL2**: Low-latency native preview window.
+  - **Shared Memory**: Triple-buffered seqlock for zero-copy OBS integration.
 
-### Mobile Companion (`mobileApp`)
+### Mobile Companion (`/mobileApp`)
 - **Frontend**: Flutter.
 - **Native Core**: 
-  - Written in **Rust** via `flutter_rust_bridge`.
-  - **Oboe**: High-performance Android audio capture.
-  - **MediaProjection**: Native Android screen capture API.
-  - **JNI Bridge**: Seamless integration between Kotlin and Rust.
+  - **Rust**: Frame muxing and AOA protocol management.
+  - **Oboe**: Low-latency C++ audio capture engine.
+  - **MediaProjection**: High-speed screen capture API.
 
 ---
 
 ## 🛠️ Getting Started
 
-### 1. Prerequisites
+### Prerequisites
 
-- **Rust**: [Install Rust](https://www.rust-lang.org/tools/install)
-- **Bun**: [Install Bun](https://bun.sh/)
-- **Flutter**: [Install Flutter](https://docs.flutter.dev/get-started/install)
-- **FFmpeg Libraries**: Ensure FFmpeg development headers are installed on your system.
+| Tool | Requirement |
+| :--- | :--- |
+| **Rust** | Stable 1.75+ |
+| **Bun** | v1.0+ |
+| **Flutter** | 3.16+ |
+| **FFmpeg** | v6.0+ with development headers (`libavcodec`, `libavutil`, etc.) |
+| **SDL2** | Development headers for native preview |
 
-### 2. Desktop Setup (Receiver)
+### Installation
 
+#### 1. Clone the repository
+```bash
+git clone https://github.com/balaji-premkumar/screenmirror.git
+cd screenmirror
+```
+
+#### 2. Desktop Setup (Receiver)
 ```bash
 cd desktopApp
-
-# Install dependencies
 bun install
-
-# Build the Rust backend
-bun run build:rust
-
-# Start the application in development mode with HMR
-bun run dev:hmr
+bun run build:rust  # Compiles the Rust backend
+bun run dev         # Starts the app in dev mode
 ```
 
-#### Linux USB Permissions
-If you are on Linux, run the included script to grant your user permission to access USB devices in Accessory mode:
-```bash
-sudo ./setup_udev.sh
-```
-
-### 3. Mobile Setup (Companion)
-
+#### 3. Mobile Setup (Companion)
 ```bash
 cd mobileApp
-
-# Get Flutter dependencies
 flutter pub get
-
-# (Optional) Generate Rust bindings if you made changes
-flutter_rust_bridge_codegen generate
-
-# Build and run on your Android device
-flutter run
+flutter run --release # Recommended to run in release for performance
 ```
 
 ---
 
 ## 📖 Usage
 
-1.  **Open the Desktop App**: Launch the ScreenMirror receiver on your PC.
-2.  **Connect Device**: Plug your Android device into your PC via a high-quality USB cable.
-3.  **Launch Companion**: Open the **Mirror Companion** app on your Android device.
-4.  **Authorize**: Accept the USB connection prompt on your phone.
-5.  **Start Mirroring**: The stream should start automatically. You can monitor performance metrics (FPS, Latency, Mbps) directly on the phone's dashboard.
+1.  **Launch** the ScreenMirror Desktop application.
+2.  **Connect** your Android device via USB.
+3.  **Open** the ScreenMirror Companion app on your phone.
+4.  **Authorize**: Grant the USB Accessory and Screen Recording permissions when prompted.
+5.  **Enjoy**: The stream will automatically initialize. Use the **Dashboard** to monitor performance.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Whether it's bug fixes, new features, or documentation improvements, please feel free to open a Pull Request.
+We welcome contributions! Please see our [ISSUES.md](ISSUES.md) for current bottlenecks and planned features.
 
-1.  Fork the Project
-2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3.  Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4.  Push to the Branch (`git push origin feature/AmazingFeature`)
-5.  Open a Pull Request
+1.  Fork the Project.
+2.  Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
+3.  Commit your Changes (`git commit -m 'feat: add some AmazingFeature'`).
+4.  Push to the Branch (`git push origin feature/AmazingFeature`).
+5.  Open a Pull Request.
 
 ---
 
 ## 📄 License
 
-Distributed under the MIT License. See `LICENSE` for more information. (Note: Ensure you add a LICENSE file if this is a public repo).
+Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
 
 ## 🌟 Acknowledgments
 
-- [Electrobun](https://github.com/mitch-m/electrobun) for the lightweight desktop runtime.
-- [flutter_rust_bridge](https://github.com/fzyzcjy/flutter_rust_bridge) for the seamless Flutter/Rust integration.
-- [FFmpeg](https://ffmpeg.org/) and [WGPU](https://wgpu.rs/) for the power-efficient media pipeline.
+- [Electrobun](https://github.com/mitch-m/electrobun) for the native runtime.
+- [ffmpeg-next](https://github.com/zmwangx/rust-ffmpeg) for the Rust media bindings.
+- [Oboe](https://github.com/google/oboe) for high-performance Android audio.
