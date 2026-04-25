@@ -248,9 +248,6 @@ pub extern "C" fn get_metrics() -> *mut libc::c_char {
 pub extern "C" fn check_driver_status() -> i32 {
     #[cfg(target_os = "linux")]
     {
-        // Check both filenames for compatibility:
-        // - setup_udev.sh installs to 51-android-aoa.rules
-        // - setup_linux_permissions() installs to 51-android-aoa.rules
         let path_primary = std::path::Path::new("/etc/udev/rules.d/51-android-aoa.rules");
         let path_legacy = std::path::Path::new("/etc/udev/rules.d/99-android-mirror.rules");
         if path_primary.exists() || path_legacy.exists() {
@@ -296,7 +293,6 @@ pub extern "C" fn setup_linux_permissions() -> i32 {
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-        // Aligned with setup_udev.sh — both use 51-android-aoa.rules
         let rule_path = "/etc/udev/rules.d/51-android-aoa.rules";
         if std::path::Path::new(rule_path).exists() {
             return 0;
@@ -327,7 +323,6 @@ pub extern "C" fn setup_linux_permissions() -> i32 {
                     .arg("trigger")
                     .status();
 
-                // Re-verify after pkexec
                 if std::path::Path::new(rule_path).exists() {
                     receiver::log_event(
                         "SUCCESS",
@@ -339,7 +334,6 @@ pub extern "C" fn setup_linux_permissions() -> i32 {
                 }
                 return -1;
             }
-
             Err(_) => return -1,
         }
     }
@@ -358,7 +352,6 @@ pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
     decoder::start_decoder_thread(queue.clone());
     receiver::start_usb_listener_thread();
 
-    // Initialise the OBS shared memory feed (separate from the internal shmem)
     obs_feed::init(width, height);
 
     if let Ok(mut state_lock) = STATE.lock() {
@@ -383,7 +376,6 @@ pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, width: 
                 let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
                 m.record_frame(len, start.elapsed().as_millis() as u64);
 
-                // Also push to OBS shared memory feed if enabled (Legacy path)
                 obs_feed::write_frame(data, len, width, height, _format, timestamp);
                 return 0;
             }
@@ -410,8 +402,6 @@ pub extern "C" fn push_packet(data: *const u8, len: usize) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn get_status() -> i32 {
-    // Return 1 only when a USB device is actively connected and streaming,
-    // not just when the mirror state has been initialized.
     if STATE.lock().unwrap_or_else(|e| e.into_inner()).is_some() && receiver::is_streaming() {
         1
     } else {

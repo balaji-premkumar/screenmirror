@@ -142,7 +142,7 @@ pub fn start_native_preview(_project_root: &str) {
                     } else if frame.format == 2 {
                         PixelFormatEnum::IYUV
                     } else {
-                        PixelFormatEnum::ABGR8888 // SDL2 BGRA is actually ABGR in memory for some reason?
+                        PixelFormatEnum::ABGR8888 
                     };
                     texture = texture_creator.create_texture_streaming(pf, frame.width as u32, frame.height as u32).ok();
                     tex_width = frame.width;
@@ -152,17 +152,14 @@ pub fn start_native_preview(_project_root: &str) {
 
                 if let Some(tex) = texture.as_mut() {
                     if frame.format == 0 {
-                        // BGRA
                         let _ = tex.update(None, &frame.data, frame.width * 4);
                     } else if frame.format == 1 {
-                        // NV12
                         let y_len = frame.width * frame.height;
                         let uv_len = y_len / 2;
                         if frame.data.len() >= y_len + uv_len {
                             let _ = tex.update(None, &frame.data, frame.width);
                         }
                     } else {
-                        // IYUV
                         let y_len = frame.width * frame.height;
                         let u_len = y_len / 4;
                         let v_len = y_len / 4;
@@ -184,10 +181,8 @@ pub fn start_native_preview(_project_root: &str) {
                     let mut dst_h = win_h;
                     
                     if src_ratio > dst_ratio {
-                        // Source is wider than destination (pillarbox top/bottom)
                         dst_h = (win_w as f32 / src_ratio) as u32;
                     } else {
-                        // Source is taller than destination (pillarbox left/right)
                         dst_w = (win_h as f32 * src_ratio) as u32;
                     }
                     
@@ -202,7 +197,6 @@ pub fn start_native_preview(_project_root: &str) {
                     canvas.present();
                 }
                 
-                // Return buffer to pool
                 frame.data.clear();
                 let _ = FREE_QUEUE.push(frame.data);
             } else {
@@ -211,7 +205,7 @@ pub fn start_native_preview(_project_root: &str) {
         }
 
         PREVIEW_ACTIVE.store(false, Ordering::Relaxed);
-        crate::audio::AUDIO_MUTED.store(true, Ordering::Relaxed); // mute again when closed
+        crate::audio::AUDIO_MUTED.store(true, Ordering::Relaxed); 
         log_event("INFO", "PREVIEW", "sdl2", "Preview window closed");
     });
 }
@@ -219,11 +213,10 @@ pub fn start_native_preview(_project_root: &str) {
 pub fn update_preview_window(mut data: Vec<u8>, width: usize, height: usize, format: u32) {
     if !PREVIEW_ACTIVE.load(Ordering::Relaxed) {
         data.clear();
-        let _ = FREE_QUEUE.push(data); // return it to pool immediately
+        let _ = FREE_QUEUE.push(data); 
         return;
     }
 
-    // Drain queue if full to avoid lag (always keep the freshest frame)
     while PREVIEW_QUEUE.is_full() {
         if let Ok(mut old) = PREVIEW_QUEUE.pop() {
             old.data.clear();

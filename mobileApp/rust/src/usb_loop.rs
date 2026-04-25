@@ -89,15 +89,11 @@ pub fn start_usb_loop(fd: i32) {
             let len = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if len > 0 {
                 if let Ok(full_str) = std::str::from_utf8(&buf[..len as usize]) {
-                    // Desktop might send multiple JSON objects in one packet or separate packets
-                    // Split by null terminator if present, or just try to find JSON boundaries
                     for part in full_str.split('\0').filter(|s| !s.trim().is_empty()) {
-                        // Update the config queue for Dart to poll
                         if let Ok(mut lock) = crate::api::LATEST_CONFIG.lock() {
                             lock.push(part.to_string());
                         }
 
-                        // Also update PIPELINE_RUNNING directly for faster response in the rust thread
                         if part.contains("\"command\":\"start\"") {
                             if let Ok(mut run) = PIPELINE_RUNNING.lock() {
                                 *run = true;
@@ -144,11 +140,9 @@ pub fn start_usb_loop(fd: i32) {
         let mut frames_sent = 0;
 
         loop {
-            // Check if pipeline should be running
             let is_running = *PIPELINE_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
             
             if is_running && audio_handle.is_none() {
-                // Start audio capture when pipeline starts
                 let m_clone = muxer_clone.clone();
                 match AudioCapture::start(move |pcm_data: &[u8]| {
                     if let Ok(mut m) = m_clone.lock() {
@@ -159,8 +153,7 @@ pub fn start_usb_loop(fd: i32) {
                     Err(e) => set_state(AoaState::Error(format!("Audio start failed: {:?}", e))),
                 }
             } else if !is_running && audio_handle.is_some() {
-                // Stop audio capture when pipeline stops
-                audio_handle = None; // Dropping AudioCapture stops it
+                audio_handle = None; 
             }
 
             match frame_rx.recv_timeout(Duration::from_millis(100)) {
@@ -172,7 +165,6 @@ pub fn start_usb_loop(fd: i32) {
                     
                     let frame_type_video = frame_len > 9 && frame[4] == 0x01;
                     
-                    // Release back to pool
                     Muxer::release_buffer(frame);
 
                     if written <= 0 {

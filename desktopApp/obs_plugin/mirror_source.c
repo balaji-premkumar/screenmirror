@@ -203,14 +203,13 @@ static void *audio_thread(void *arg)
         if (head >= AUDIO_BUFFER_SAMPLES) head = 0;
 
         if (ctx->audio_tail == head) {
-            usleep(5000); // 5ms sleep
+            usleep(5000); 
             continue;
         }
 
         float *data = (float *)(ctx->audio_shm_ptr + AUDIO_HEADER_SIZE);
         uint32_t count = 0;
         
-        // Handle wrap-around
         if (head < ctx->audio_tail) {
             count = AUDIO_BUFFER_SAMPLES - ctx->audio_tail;
             struct obs_source_audio audio = {0};
