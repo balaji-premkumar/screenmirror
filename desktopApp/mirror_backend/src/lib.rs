@@ -24,8 +24,8 @@ pub struct FrameHeader {
     pub magic: [u8; 4],
     pub width: u32,
     pub height: u32,
-    pub timestamp: u64,
     pub data_size: u32,
+    pub timestamp: u64,
     pub _pad: [u8; 8],
 }
 

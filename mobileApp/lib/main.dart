@@ -6,13 +6,20 @@ import 'dart:convert';
 import 'src/rust/frb_generated.dart';
 import 'src/rust/api.dart' as rust_api;
 
+// Design Tokens (Kinetic Precision)
+const kPrimaryCyan = Color(0xFF00F0FF);
+const kBgVoid = Color(0xFF0A0A0B);
+const kSurfaceSlate = Color(0xFF1A1F2C);
+const kTextOffWhite = Color(0xFFE0E2E8);
+const kTextMuted = Color(0xFF8E9196);
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
-    systemNavigationBarColor: Color(0xFF050505),
+    systemNavigationBarColor: kBgVoid,
   ));
   runApp(const MirrorCompanionApp());
 }
@@ -27,8 +34,9 @@ class MirrorCompanionApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF050505),
+        scaffoldBackgroundColor: kBgVoid,
         useMaterial3: true,
+        fontFamily: 'Inter',
       ),
       home: const CompanionDashboard(),
     );
@@ -46,7 +54,7 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     with TickerProviderStateMixin {
   // ── State ──
   String _connState = 'idle'; // idle | connecting | streaming | error
-  String _statusMsg = 'Waiting for USB connection...';
+  String _statusMsg = 'Waiting for USB...';
   bool _rustReady = false;
 
   // Metrics
@@ -66,7 +74,6 @@ class _CompanionDashboardState extends State<CompanionDashboard>
 
   // Animations
   late AnimationController _pulse;
-  late AnimationController _glow;
 
   // USB channel
   static const _ch = MethodChannel('com.mirror.stream/usb');
@@ -74,21 +81,18 @@ class _CompanionDashboardState extends State<CompanionDashboard>
   @override
   void initState() {
     super.initState();
-    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat(reverse: true);
-    _glow = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat(reverse: true);
-    _log('SYSTEM', 'Mirror Companion v1.0 started');
+    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))..repeat(reverse: true);
     _requestPermissions();
     _setupUsb();
     _initRust();
   }
 
-  // Removed `_checkInitialAccessory()` implementation because it was duplicated in `_setupUsb()`
   Future<void> _requestPermissions() async {
     final status = await Permission.microphone.request();
     if (status.isGranted) {
-      _log('SYSTEM', 'Microphone permission granted');
+      _log('SYSTEM', 'Audio permissions OK');
     } else {
-      _log('WARN', 'Microphone permission denied — audio will not work');
+      _log('WARN', 'Audio denied');
     }
   }
 
@@ -98,7 +102,6 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _uptimeTimer?.cancel();
     _configPollTimer?.cancel();
     _pulse.dispose();
-    _glow.dispose();
     _logScroll.dispose();
     super.dispose();
   }
@@ -110,12 +113,11 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     if (!mounted) return;
     setState(() {
       _logs.add(_Log(ts: ts, tag: tag, msg: msg));
-      if (_logs.length > 200) _logs.removeRange(0, _logs.length - 200);
+      if (_logs.length > 100) _logs.removeRange(0, _logs.length - 100);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_logScroll.hasClients) {
-        _logScroll.animateTo(_logScroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 100), curve: Curves.easeOut);
+        _logScroll.jumpTo(_logScroll.position.maxScrollExtent);
       }
     });
   }
@@ -125,41 +127,32 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _ch.setMethodCallHandler((call) async {
       if (call.method == 'onUsbAttached') {
         final int fd = call.arguments as int;
-        _log('USB', 'Accessory attached — FD=$fd');
+        _log('USB', 'Host attached (FD=$fd)');
         _onConnected(fd);
       } else if (call.method == 'onUsbDetached') {
-        _log('USB', 'Accessory detached');
+        _log('USB', 'Host detached');
         _onDisconnected();
       }
       return null;
     });
-    _log('USB', 'Listening for accessory events...');
 
-    // Attempt to recover pending accessory that fired before Dart compiled/was ready
     try {
       final int? fd = await _ch.invokeMethod<int>('getInitialAccessory');
       if (fd != null && fd >= 0) {
-        _log('USB', 'Recovered pending accessory — FD=$fd');
+        _log('USB', 'Recovered session');
         _onConnected(fd);
       }
-    } catch (e) {
-      _log('WARN', 'Could not query initial accessory: $e');
-    }
+    } catch (_) {}
   }
 
-  // ── Rust Init (non-blocking) ────────────────────────────────
   Future<void> _initRust() async {
-    _log('RUST', 'Loading native library...');
     try {
-      await RustLib.init().timeout(const Duration(seconds: 8), onTimeout: () {
-        throw TimeoutException('RustLib.init() exceeded 8s');
-      });
+      await RustLib.init().timeout(const Duration(seconds: 5));
       if (!mounted) return;
       setState(() => _rustReady = true);
-      _log('RUST', 'Native library ready ✓');
+      _log('NATIVE', 'Engine initialized ✓');
     } catch (e) {
-      _log('WARN', 'Rust unavailable: $e');
-      _log('SYSTEM', 'Running in JNI-only mode — streaming still works');
+      _log('NATIVE', 'Running legacy mode');
     }
   }
 
@@ -167,56 +160,41 @@ class _CompanionDashboardState extends State<CompanionDashboard>
   void _onConnected(int fd) {
     setState(() {
       _connState = 'connecting';
-      _statusMsg = 'Establishing pipeline...';
+      _statusMsg = 'Linking...';
     });
-
-    _log('PIPE', 'Initializing video encoder...');
 
     if (_rustReady) {
       _startRustPipeline(fd);
     } else {
-      // JNI path: MirrorForegroundService pushes directly
-      _log('PIPE', 'Using JNI pipeline (Rust unavailable)');
       _setStreaming();
     }
 
     _configPollTimer?.cancel();
     _configPollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       try {
-        // 1. Poll for commands from the desktop
         final configStr = rust_api.pollConfig();
         if (configStr != null && configStr.isNotEmpty) {
-          _log('CONFIG', 'Received config from desktop: $configStr');
           final config = jsonDecode(configStr);
           if (config["command"] == "start") {
              _requestMediaProjection(config);
           } else if (config["command"] == "stop") {
-             _log('CONTROL', 'Desktop requested stop');
              await _ch.invokeMethod('stopService');
              setState(() {
-                _connState = 'connected'; // Stay in connected state, just stop streaming
-                _statusMsg = 'Ready for capture';
-                _throughput = 0;
-                _fps = 0;
-                _latencyMs = 0;
+                _connState = 'connected';
+                _statusMsg = 'Ready';
              });
-             _log('SYSTEM', 'Streaming stopped — waiting for next command');
              return;
           }
         }
 
-        // 2. Poll the Rust USB connection state to detect disconnection
         final rustState = rust_api.getConnectionState();
         if (_connState == 'streaming' || _connState == 'connecting' || _connState == 'connected') {
           if (rustState == 'idle' || rustState.startsWith('error:')) {
-            _log('USB', 'Connection lost (Rust state: $rustState)');
             try { await _ch.invokeMethod('stopService'); } catch (_) {}
             _onDisconnected();
           }
         }
-      } catch (e) {
-        // parsing error or FFI not ready
-      }
+      } catch (_) {}
     });
   }
 
@@ -226,49 +204,33 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     _configPollTimer?.cancel();
     setState(() {
       _connState = 'idle';
-      _statusMsg = 'Waiting for USB connection...';
+      _statusMsg = 'Disconnected';
       _uptime = Duration.zero;
       _throughput = 0;
       _fps = 0;
-      _latencyMs = 0;
     });
-    _log('SYSTEM', 'Pipeline stopped — ready for reconnection');
   }
 
   Future<void> _startRustPipeline(int fd) async {
     try {
-      _log('PIPE', 'Starting Rust USB streaming on FD=$fd');
-      final result = await rust_api.startUsbStreaming(fd: fd);
-      _log('SUCCESS', result);
+      await rust_api.startUsbStreaming(fd: fd);
       _setStreaming();
     } catch (e) {
-      _log('ERROR', 'Rust pipeline failed: $e');
-      _log('PIPE', 'Falling back to JNI mode');
       _setStreaming();
     }
   }
 
-  /// Request screen capture permission from the system.
-  /// On approval, MainActivity starts MirrorForegroundService which
-  /// configures MediaCodec (H.265 encoder) and begins pushing encoded
-  /// frames through the JNI bridge → Rust Muxer → USB write loop.
   Future<void> _requestMediaProjection(Map<dynamic, dynamic>? config) async {
     try {
-      _log('CAPTURE', 'Requesting screen capture permission...');
-      if (config != null) {
-         await _ch.invokeMethod('setConfig', config);
-      }
+      if (config != null) await _ch.invokeMethod('setConfig', config);
       await _ch.invokeMethod('requestMediaProjection');
-      _log('SUCCESS', 'MediaProjection request sent to system');
-    } catch (e) {
-      _log('ERROR', 'MediaProjection request failed: $e');
-    }
+    } catch (_) {}
   }
 
   void _setStreaming() {
     setState(() {
       _connState = 'streaming';
-      _statusMsg = 'Streaming to PC';
+      _statusMsg = 'Live Feed';
     });
     _uptimeTimer?.cancel();
     _uptime = Duration.zero;
@@ -276,7 +238,6 @@ class _CompanionDashboardState extends State<CompanionDashboard>
       if (mounted) setState(() => _uptime += const Duration(seconds: 1));
     });
     _startMetrics();
-    _log('SUCCESS', 'Video + audio flowing to desktop ✓');
   }
 
   void _startMetrics() {
@@ -290,7 +251,6 @@ class _CompanionDashboardState extends State<CompanionDashboard>
         if (mounted) {
           setState(() {
             _throughput = (m['throughput_mbps'] ?? 0).toDouble();
-            _latencyMs = (m['encoding_latency_ms'] ?? 0).toInt();
             _fps = (m['fps_actual'] ?? 0).toDouble();
           });
         }
@@ -298,224 +258,188 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     });
   }
 
-  // ── UI ──────────────────────────────────────────────────────
+  // ── UI Implementation (Stitch Design) ───────────────────────
   @override
   Widget build(BuildContext context) {
-    final streaming = _connState == 'streaming';
-    final connecting = _connState == 'connecting';
-    final error = _connState == 'error';
-
     return Scaffold(
       body: SafeArea(
         child: Column(
           children: [
-            _header(streaming),
-            _statusCard(streaming, connecting, error),
-            if (streaming) _metrics(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Divider(color: Colors.white.withValues(alpha: 0.04), height: 1),
-            ),
+            _header(),
+            _liveIndicator(),
+            _metricsGrid(),
+            const SizedBox(height: 12),
             Expanded(child: _logPanel()),
-            _footer(streaming),
+            _footer(),
           ],
         ),
       ),
     );
   }
 
-  // ── Header ──────────────────────────────────────────────────
-  Widget _header(bool streaming) {
+  Widget _header() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+      padding: const EdgeInsets.all(24),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('MIRROR',
-              style: TextStyle(color: Colors.orange, fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: 6)),
-            const SizedBox(height: 2),
-            Text('COMPANION',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.25), fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 8)),
-          ]),
-          Row(children: [
-            // Rust / JNI badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: (_rustReady ? Colors.green : Colors.yellow).withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: (_rustReady ? Colors.green : Colors.yellow).withValues(alpha: 0.15)),
+          Row(
+            children: [
+              Container(
+                width: 24, height: 24,
+                decoration: BoxDecoration(color: kPrimaryCyan, borderRadius: BorderRadius.circular(4)),
+                child: const Center(child: Icon(Icons.bolt, size: 16, color: Colors.black)),
               ),
-              child: Text(_rustReady ? 'NATIVE' : 'JNI',
-                style: TextStyle(color: _rustReady ? Colors.green : Colors.yellow, fontSize: 8, fontWeight: FontWeight.w900, letterSpacing: 2)),
+              const SizedBox(width: 12),
+              const Text('MIRROR PRO', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 2, color: kTextOffWhite)),
+            ],
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
             ),
-            const SizedBox(width: 10),
-            FadeTransition(
-              opacity: _pulse,
-              child: Container(width: 8, height: 8, decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: streaming ? Colors.green : Colors.red,
-                boxShadow: [BoxShadow(color: (streaming ? Colors.green : Colors.red).withValues(alpha: 0.5), blurRadius: 6, spreadRadius: 2)],
-              )),
-            ),
-          ]),
+            child: Text(_rustReady ? 'NATIVE v2.4' : 'LEGACY', style: const TextStyle(color: kTextMuted, fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          ),
         ],
       ),
     );
   }
 
-  // ── Status Card ─────────────────────────────────────────────
-  Widget _statusCard(bool streaming, bool connecting, bool error) {
-    Color c = Colors.white.withValues(alpha: 0.3);
-    if (streaming) c = Colors.green;
-    if (connecting) c = Colors.orange;
-    if (error) c = Colors.red;
-
-    return AnimatedBuilder(
-      animation: _glow,
-      builder: (ctx, _) {
-        final g = streaming ? 0.02 + _glow.value * 0.04 : 0.0;
-        return Container(
-          margin: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Color.lerp(const Color(0xFF0a0a0a), c, g),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: c.withValues(alpha: streaming ? 0.15 : 0.06)),
+  Widget _liveIndicator() {
+    final streaming = _connState == 'streaming';
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: kSurfaceSlate,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: streaming ? kPrimaryCyan.withOpacity(0.3) : Colors.white10),
+      ),
+      child: Row(
+        children: [
+          FadeTransition(
+            opacity: _pulse,
+            child: Container(width: 8, height: 8, decoration: BoxDecoration(shape: BoxShape.circle, color: streaming ? kPrimaryCyan : kTextMuted)),
           ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: c)),
-              const SizedBox(width: 10),
-              Expanded(child: Text(_statusMsg.toUpperCase(),
-                style: TextStyle(color: c, fontSize: 13, fontWeight: FontWeight.w900, letterSpacing: 1))),
-            ]),
-            if (streaming) ...[
-              const SizedBox(height: 12),
-              Text(_fmtUptime(_uptime),
-                style: TextStyle(color: Colors.white.withValues(alpha: 0.18), fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 3)),
-            ],
-            if (connecting) ...[
-              const SizedBox(height: 16),
-              const LinearProgressIndicator(color: Colors.orange, backgroundColor: Colors.transparent),
-            ],
-          ]),
-        );
-      },
+          const SizedBox(width: 12),
+          Text(_statusMsg.toUpperCase(), style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: streaming ? kPrimaryCyan : kTextMuted, letterSpacing: 1)),
+          const Spacer(),
+          if (streaming) Text(_fmtUptime(_uptime), style: const TextStyle(fontSize: 11, color: kTextMuted, fontFamily: 'monospace')),
+        ],
+      ),
     );
   }
 
-  // ── Metrics Row ─────────────────────────────────────────────
-  Widget _metrics() {
+  Widget _metricsGrid() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-      child: Row(children: [
-        _chip('THROUGHPUT', '${_throughput.toStringAsFixed(1)} Mbps', Colors.blue),
-        const SizedBox(width: 8),
-        _chip('LATENCY', '${_latencyMs}ms', Colors.green),
-        const SizedBox(width: 8),
-        _chip('FPS', _fps.toStringAsFixed(0), Colors.orange),
-      ]),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+      child: Row(
+        children: [
+          _metricCard('THROUGHPUT', '${_throughput.toStringAsFixed(1)} Mbps'),
+          const SizedBox(width: 12),
+          _metricCard('SYNC RATE', '${_fps.toStringAsFixed(0)} FPS'),
+        ],
+      ),
     );
   }
 
-  Widget _chip(String label, String value, Color c) {
+  Widget _metricCard(String label, String value) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: c.withValues(alpha: 0.05),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: c.withValues(alpha: 0.08)),
+          color: kSurfaceSlate,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white.withOpacity(0.05)),
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: TextStyle(color: c.withValues(alpha: 0.45), fontSize: 7, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
-          const SizedBox(height: 4),
-          Text(value, style: TextStyle(color: c, fontSize: 14, fontWeight: FontWeight.w900)),
-        ]),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(color: kTextMuted, fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 1)),
+            const SizedBox(height: 8),
+            Text(value, style: const TextStyle(color: kPrimaryCyan, fontSize: 18, fontWeight: FontWeight.w900)),
+          ],
+        ),
       ),
     );
   }
 
-  // ── Log Panel ───────────────────────────────────────────────
   Widget _logPanel() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF080808),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.03)),
+        color: Colors.black26,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
       ),
-      child: Column(children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text('DIAGNOSTIC LOG',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.2), fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 3)),
-            Text('${_logs.length}',
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.12), fontSize: 9)),
-          ]),
-        ),
-        Divider(height: 1, color: Colors.white.withValues(alpha: 0.03)),
-        Expanded(
-          child: _logs.isEmpty
-            ? Center(child: Text('No log entries yet...',
-                style: TextStyle(color: Colors.white.withValues(alpha: 0.1), fontSize: 11)))
-            : ListView.builder(
-                controller: _logScroll,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                itemCount: _logs.length,
-                itemBuilder: (_, i) {
-                  final l = _logs[i];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      SizedBox(width: 50, child: Text(l.ts,
-                        style: TextStyle(color: Colors.white.withValues(alpha: 0.12), fontSize: 9, fontFamily: 'monospace'))),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: _tagClr(l.tag).withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                        child: Text(l.tag,
-                          style: TextStyle(color: _tagClr(l.tag), fontSize: 8, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
+            child: const Row(
+              children: [
+                Text('DIAGNOSTIC STREAM', style: TextStyle(color: kTextMuted, fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                Spacer(),
+                Icon(Icons.radar, size: 10, color: kTextMuted),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _logs.isEmpty 
+              ? const Center(child: Text('AWAITING DATA...', style: TextStyle(color: Colors.white10, fontSize: 10, letterSpacing: 2)))
+              : ListView.builder(
+                  controller: _logScroll,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: _logs.length,
+                  itemBuilder: (_, i) {
+                    final l = _logs[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(l.ts, style: TextStyle(color: Colors.white.withOpacity(0.1), fontSize: 9, fontFamily: 'monospace')),
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: BoxDecoration(color: _tagClr(l.tag).withOpacity(0.1), borderRadius: BorderRadius.circular(2)),
+                            child: Text(l.tag, style: TextStyle(color: _tagClr(l.tag), fontSize: 7, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(l.msg, style: TextStyle(color: kTextMuted.withOpacity(0.8), fontSize: 10, height: 1.2))),
+                        ],
                       ),
-                      Expanded(child: Text(l.msg,
-                        style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 10, height: 1.4, fontFamily: 'monospace'))),
-                    ]),
-                  );
-                },
-              ),
-        ),
-      ]),
+                    );
+                  },
+                ),
+          ),
+        ],
+      ),
     );
   }
 
-  // ── Footer ──────────────────────────────────────────────────
-  Widget _footer(bool streaming) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(24, 10, 24, 14),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Text(streaming ? 'LINKED TO DESKTOP' : 'PLUG USB TO START',
-          style: TextStyle(color: Colors.white.withValues(alpha: 0.12), fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 3)),
-        Text('AUTO-CONNECT',
-          style: TextStyle(color: Colors.orange.withValues(alpha: 0.25), fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 2)),
-      ]),
+  Widget _footer() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          const Text('KINETIC ENGINE ACTIVE', style: TextStyle(color: Colors.white10, fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          Text(_connState == 'streaming' ? 'ENCRYPTED LINK' : 'READY FOR LINK', style: const TextStyle(color: Colors.white10, fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 1)),
+        ],
+      ),
     );
   }
 
-  // ── Helpers ─────────────────────────────────────────────────
   Color _tagClr(String tag) => switch (tag) {
-    'ERROR' => Colors.red,
-    'WARN' => Colors.yellow,
-    'SUCCESS' => Colors.green,
-    'USB' => Colors.blue,
-    'PIPE' || 'CAPTURE' => Colors.purple,
-    'RUST' => Colors.teal,
-    _ => Colors.grey,
+    'ERROR' => Colors.redAccent,
+    'WARN' => Colors.amberAccent,
+    'SUCCESS' => kPrimaryCyan,
+    _ => kTextMuted,
   };
 
   String _fmtUptime(Duration d) =>

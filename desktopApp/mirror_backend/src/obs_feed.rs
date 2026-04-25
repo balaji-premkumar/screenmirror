@@ -434,7 +434,7 @@ pub fn install_plugin(project_root: &str) -> i32 {
     let plugin_src = if std::path::Path::new(&bundled_bin).exists() {
         Some(bundled_bin)
     } else if std::path::Path::new(&dev_bin).exists() {
-        Some(dev_bin)
+        Some(dev_bin.clone())
     } else {
         None
     };

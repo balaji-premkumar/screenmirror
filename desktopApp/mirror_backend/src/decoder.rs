@@ -111,7 +111,7 @@ impl H265Decoder {
                     Pixel::BGRA,
                     width,
                     height,
-                    flag::Flags::BILINEAR | flag::Flags::SWS_ACCEL,
+                    flag::Flags::BILINEAR,
                 )
                 .unwrap();
 

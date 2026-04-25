@@ -35,8 +35,8 @@ struct mpro_frame_header {
     char     magic[4];       /* "MIRR" */
     uint32_t width;
     uint32_t height;
-    uint64_t timestamp;
     uint32_t data_size;
+    uint64_t timestamp;
     uint8_t  _pad[8];        /* Pad to 32 bytes */
 };
 

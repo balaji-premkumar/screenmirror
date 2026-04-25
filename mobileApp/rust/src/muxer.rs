@@ -75,6 +75,6 @@ pub struct AvPacket {
 
 impl AvPacket {
     pub fn serialize(&self) -> Vec<u8> {
-        Muxer::frame_packet(self.ptype, &self.data)
+        Muxer::frame_packet_pooled(self.ptype, &self.data)
     }
 }
