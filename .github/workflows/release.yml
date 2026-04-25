@@ -1,0 +1,38 @@
+name: Release Application
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  mobile:
+    uses: ./.github/workflows/mobile.yml
+  desktop:
+    uses: ./.github/workflows/desktop.yml
+  obs_plugin:
+    uses: ./.github/workflows/obs_plugin.yml
+
+  create_release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [mobile, desktop, obs_plugin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            mirror-companion-apk/*.apk
+            mirror-desktop-ubuntu-latest/**/*
+            mirror-desktop-windows-latest/**/*
+            mirror-desktop-macos-latest/**/*
+            obs-plugin-linux/*.so
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

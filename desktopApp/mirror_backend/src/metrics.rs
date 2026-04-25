@@ -1,7 +1,7 @@
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::time::{Instant, Duration};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub static METRICS: Lazy<Mutex<MetricsManager>> = Lazy::new(|| Mutex::new(MetricsManager::new()));
 
@@ -15,7 +15,8 @@ pub struct MetricsSnapshot {
 }
 
 pub struct MetricsManager {
-    pub total_bytes: u64,
+    pub total_bytes: u64, // decoded video bytes (for reference/debugging if needed)
+    pub total_usb_bytes: u64, // actual network/usb payload bytes
     pub frame_count: u64,
     pub last_tick: Instant,
     pub start_time: Instant,
@@ -27,12 +28,17 @@ impl MetricsManager {
     pub fn new() -> Self {
         Self {
             total_bytes: 0,
+            total_usb_bytes: 0,
             frame_count: 0,
             last_tick: Instant::now(),
             start_time: Instant::now(),
             dropped_count: 0,
             current_latency: 0,
         }
+    }
+
+    pub fn record_usb_bytes(&mut self, bytes: usize) {
+        self.total_usb_bytes += bytes as u64;
     }
 
     pub fn record_frame(&mut self, bytes: usize, latency: u64) {
@@ -47,6 +53,7 @@ impl MetricsManager {
 
     pub fn reset(&mut self) {
         self.total_bytes = 0;
+        self.total_usb_bytes = 0;
         self.frame_count = 0;
         self.last_tick = Instant::now();
         self.start_time = Instant::now();
@@ -57,17 +64,24 @@ impl MetricsManager {
     pub fn get_snapshot(&mut self) -> MetricsSnapshot {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick).as_secs_f64();
-        
+
+        // Calculate throughput based on USB bytes (actual stream bandwidth)
+        // 1 Mbps = 1,000,000 bits per second
         let throughput = if elapsed > 0.0 {
-            (self.total_bytes as f64 * 8.0) / (1024.0 * 1024.0 * elapsed)
-        } else { 0.0 };
+            (self.total_usb_bytes as f64 * 8.0) / (1_000_000.0 * elapsed)
+        } else {
+            0.0
+        };
 
         let fps = if elapsed > 0.0 {
             self.frame_count as f64 / elapsed
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // Reset counters for next tick
         self.total_bytes = 0;
+        self.total_usb_bytes = 0;
         self.frame_count = 0;
         self.last_tick = now;
 

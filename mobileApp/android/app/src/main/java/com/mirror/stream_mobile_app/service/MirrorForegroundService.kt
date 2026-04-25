@@ -114,13 +114,26 @@ class MirrorForegroundService : Service() {
             }
         }, null)
 
-        val width = if (resStr == "720p") 1280 else if (resStr == "2K") 2560 else if (resStr == "4K") 3840 else 1920
-        val height = if (resStr == "720p") 720 else if (resStr == "2K") 1440 else if (resStr == "4K") 2160 else 1080
+        // Use Configuration to safely detect orientation from a Service context
+        // (Context.display throws in Services; Resources.configuration is always safe)
+        val orientation = resources.configuration.orientation
+        val isPortrait = orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
+        var targetWidth = if (resStr == "720p") 1280 else if (resStr == "2K") 2560 else if (resStr == "4K") 3840 else 1920
+        var targetHeight = if (resStr == "720p") 720 else if (resStr == "2K") 1440 else if (resStr == "4K") 2160 else 1080
+
+        // Swap dimensions if we are in portrait
+        if (isPortrait) {
+            val temp = targetWidth
+            targetWidth = targetHeight
+            targetHeight = temp
+        }
+
         val dpi = 400
         val bitrate = (bitStr.split(" ").firstOrNull()?.toIntOrNull() ?: 8) * 1024 * 1024
         val fps = fpsStr.split(" ").firstOrNull()?.toIntOrNull() ?: 60
 
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, width, height)
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, targetWidth, targetHeight)
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
@@ -136,13 +149,13 @@ class MirrorForegroundService : Service() {
         mediaCodec?.start()
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "MirrorDisplay", width, height, dpi,
+            "MirrorDisplay", targetWidth, targetHeight, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             inputSurface, null, null
         )
 
         isRunning = true
-        android.util.Log.i("MirrorService", "Encoder started: ${width}x${height} @ ${bitrate/1024/1024}Mbps HEVC")
+        android.util.Log.i("MirrorService", "Encoder started: ${targetWidth}x${targetHeight} @ ${bitrate/1024/1024}Mbps HEVC (Portrait: $isPortrait)")
         Thread { drainEncoder() }.start()
     }
 

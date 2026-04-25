@@ -53,3 +53,9 @@ local.properties
 
 # Logs
 *.log
+
+# Large Binaries / Bundled Tools
+desktopApp/desktopApp/bin/ffmpeg
+desktopApp/desktopApp/bin/ffplay
+desktopApp/bin/ffmpeg
+desktopApp/bin/ffplay

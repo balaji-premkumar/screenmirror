@@ -193,14 +193,21 @@ class _CompanionDashboardState extends State<CompanionDashboard>
           } else if (config["command"] == "stop") {
              _log('CONTROL', 'Desktop requested stop');
              await _ch.invokeMethod('stopService');
-             _onDisconnected();
+             setState(() {
+                _connState = 'connected'; // Stay in connected state, just stop streaming
+                _statusMsg = 'Ready for capture';
+                _throughput = 0;
+                _fps = 0;
+                _latencyMs = 0;
+             });
+             _log('SYSTEM', 'Streaming stopped — waiting for next command');
              return;
           }
         }
 
         // 2. Poll the Rust USB connection state to detect disconnection
         final rustState = rust_api.getConnectionState();
-        if (_connState == 'streaming' || _connState == 'connecting') {
+        if (_connState == 'streaming' || _connState == 'connecting' || _connState == 'connected') {
           if (rustState == 'idle' || rustState.startsWith('error:')) {
             _log('USB', 'Connection lost (Rust state: $rustState)');
             try { await _ch.invokeMethod('stopService'); } catch (_) {}
