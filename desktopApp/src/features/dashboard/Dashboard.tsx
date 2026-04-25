@@ -238,10 +238,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
           {/* Quick Metrics Grid */}
           <div className="grid grid-cols-4 gap-4">
             {[
-              { label: 'Throughput', val: status.metrics.throughput_mbps.toFixed(1), unit: 'Mbps', color: '#00F0FF' },
-              { label: 'Latency', val: status.metrics.pipeline_latency_ms.toFixed(0), unit: 'ms', color: status.metrics.pipeline_latency_ms < 30 ? '#4ade80' : '#f87171' },
-              { label: 'Framerate', val: status.metrics.fps_actual.toFixed(0), unit: 'FPS', color: '#00F0FF' },
-              { label: 'Drops', val: status.metrics.frames_dropped, unit: 'Frames', color: '#f87171' },
+              { label: 'Throughput', val: (status.metrics.throughput_mbps ?? 0).toFixed(1), unit: 'Mbps', color: '#00F0FF' },
+              { label: 'Latency', val: (status.metrics.pipeline_latency_ms ?? 0).toFixed(0), unit: 'ms', color: (status.metrics.pipeline_latency_ms ?? 0) < 30 ? '#4ade80' : '#f87171' },
+              { label: 'Framerate', val: (status.metrics.fps_actual ?? 0).toFixed(0), unit: 'FPS', color: '#00F0FF' },
+              { label: 'Drops', val: status.metrics.frames_dropped ?? 0, unit: 'Frames', color: '#f87171' },
             ].map((m, i) => (
               <div key={i} className="precision-card p-4 flex flex-col justify-between">
                 <span className="text-[9px] font-bold text-[#8E9196] uppercase tracking-widest">{m.label}</span>

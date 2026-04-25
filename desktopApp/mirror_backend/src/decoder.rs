@@ -17,61 +17,48 @@ pub struct H265Decoder {
     decoder: decoder::Video,
     scaler: Option<Context>,
     bgra_frame: Option<ffmpeg::util::frame::Video>,
+    consecutive_errors: u32,
+    is_software: bool,
 }
 
 impl H265Decoder {
     pub fn new() -> Result<Self, ffmpeg::Error> {
+        Self::new_internal(false)
+    }
+
+    fn new_internal(force_sw: bool) -> Result<Self, ffmpeg::Error> {
         ffmpeg::init()?;
 
-        // Attempt to find a hardware-accelerated decoder first, fallback to software
-        let codec = ffmpeg::decoder::find_by_name("hevc_videotoolbox") // macOS
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))     // Intel (Windows/Linux)
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))   // NVIDIA (Windows/Linux)
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_d3d11va")) // Windows DX11
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))   // Linux VAAPI
-            .or_else(|| ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC))
-            .ok_or(ffmpeg::Error::DecoderNotFound)?;
+        let codec = if force_sw {
+            ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC)
+                .ok_or(ffmpeg::Error::DecoderNotFound)?
+        } else {
+            // Attempt to find a hardware-accelerated decoder first
+            ffmpeg::decoder::find_by_name("hevc_videotoolbox") // macOS
+                .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))     // Intel
+                .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))   // NVIDIA
+                .or_else(|| ffmpeg::decoder::find_by_name("hevc_d3d11va")) // Windows
+                .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))   // Linux
+                .or_else(|| ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC))
+                .ok_or(ffmpeg::Error::DecoderNotFound)?
+        };
 
         log_event(
             "INFO",
             "DECODER",
             "init",
-            &format!("Selected HEVC decoder: {}", codec.name()),
+            &format!("Initializing {} decoder: {}", if force_sw { "SOFTWARE" } else { "HARDWARE" }, codec.name()),
         );
 
-        let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
-
-        // Platform specific HW acceleration hints
-        #[cfg(target_os = "windows")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting Windows DXVA2/D3D11VA acceleration",
-        );
-
-        #[cfg(target_os = "macos")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting macOS VideoToolbox acceleration",
-        );
-
-        #[cfg(target_os = "linux")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting Linux NVDEC/VAAPI acceleration",
-        );
-
+        let context = ffmpeg::codec::context::Context::new_with_codec(codec);
         let decoder = context.decoder().video()?;
 
         Ok(H265Decoder {
             decoder,
             scaler: None,
             bgra_frame: None,
+            consecutive_errors: 0,
+            is_software: force_sw,
         })
     }
 
@@ -82,14 +69,29 @@ impl H265Decoder {
         }
         packet.set_pts(Some(timestamp as i64));
 
-        if let Err(e) = self.decoder.send_packet(&packet) {
-            log_event(
-                "ERROR",
-                "DECODER",
-                "pipeline",
-                &format!("Packet send failed: {:?}", e),
-            );
-            return Err(e);
+        let send_result = self.decoder.send_packet(&packet);
+        
+        if let Err(e) = send_result {
+            match e {
+                ffmpeg::Error::Other { errno: libc::EAGAIN } => {
+                    // Buffer full, must receive frames. Not an error yet.
+                }
+                _ => {
+                    self.consecutive_errors += 1;
+                    log_event("ERROR", "DECODER", "pipeline", &format!("Packet send failed: {} (Code: {})", e, e));
+                    
+                    // Fallback to software if HW decoder fails 5 times in a row
+                    if !self.is_software && self.consecutive_errors > 5 {
+                        log_event("WARN", "DECODER", "fallback", "HW Decoder failing repeatedly. Switching to Software fallback...");
+                        if let Ok(new_decoder) = Self::new_internal(true) {
+                            *self = new_decoder;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            self.consecutive_errors = 0;
         }
 
         let mut frame = ffmpeg::util::frame::Video::empty();
@@ -99,12 +101,9 @@ impl H265Decoder {
             let format = frame.format();
 
             if self.scaler.is_none()
-                || self
-                    .bgra_frame
-                    .as_ref()
-                    .map_or(true, |f| f.width() != width || f.height() != height)
+                || self.bgra_frame.as_ref().map_or(true, |f| f.width() != width || f.height() != height)
             {
-                let mut scaler = Context::get(
+                let scaler = Context::get(
                     format,
                     width,
                     height,
@@ -112,20 +111,13 @@ impl H265Decoder {
                     width,
                     height,
                     flag::Flags::BILINEAR,
-                )
-                .unwrap();
+                ).map_err(|_| ffmpeg::Error::InvalidData)?;
 
-                // Explicitly set Rec.709 colorspace for accurate HD colors
-                // (Using ffmpeg-next context methods if possible, otherwise rely on the scaler's defaults)
-                // Note: ffmpeg-next SwScale Context doesn't always expose colorspace directly in v7.1
-                // but we can ensure it through the input frame's properties if the decoder supports it.
                 self.scaler = Some(scaler);
                 self.bgra_frame = Some(ffmpeg::util::frame::Video::new(Pixel::BGRA, width, height));
             }
 
-            if let (Some(scaler), Some(bgra_frame)) =
-                (self.scaler.as_mut(), self.bgra_frame.as_mut())
-            {
+            if let (Some(scaler), Some(bgra_frame)) = (self.scaler.as_mut(), self.bgra_frame.as_mut()) {
                 if scaler.run(&frame, bgra_frame).is_ok() {
                     let frame_ts = frame.pts().unwrap_or(timestamp as i64) as u64;
                     let width_u32 = bgra_frame.width();
@@ -141,7 +133,6 @@ impl H265Decoder {
                         .unwrap_or_else(|_| Vec::with_capacity(width * height * 4));
                     buffer.clear();
 
-                    // Copy row by row to ensure it's tightly packed
                     if stride == width * 4 {
                         buffer.extend_from_slice(&data[..width * height * 4]);
                     } else {
@@ -152,13 +143,14 @@ impl H265Decoder {
                         }
                     }
 
-                    // Mirror Pro Optimization: Use SIMD for UYVY if format is detected (Example)
-                    if format == Pixel::UYVY422 {
-                        // We could use our new SIMD convert here
-                        // crate::video_processing::compress_uyvy_to_nv12(...);
+                    // Log metrics
+                    if let Ok(mut m) = crate::metrics::METRICS.lock() {
+                        // Estimate pipeline latency (simplified)
+                        let latency = 10; // Mock for now
+                        m.record_frame(buffer.len(), latency);
                     }
 
-                    // Write to OBS (use standardized header format: magic wide height timestamp datasize)
+                    // Write to OBS
                     unsafe {
                         crate::write_frame_to_obs(
                             buffer.as_ptr(),
@@ -170,12 +162,8 @@ impl H265Decoder {
                         );
                     }
 
-                    // Push to Preview Window
+                    // Push to Preview
                     crate::renderer::update_preview_window(buffer, width, height, 0);
-
-                    if frame_ts % 100 == 0 {
-                        println!("[Decoder] Processed frame: {}x{}", width, height);
-                    }
                 }
             }
         }

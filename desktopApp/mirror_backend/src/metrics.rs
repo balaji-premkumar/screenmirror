@@ -66,7 +66,6 @@ impl MetricsManager {
         let elapsed = now.duration_since(self.last_tick).as_secs_f64();
 
         // Calculate throughput based on USB bytes (actual stream bandwidth)
-        // 1 Mbps = 1,000,000 bits per second
         let throughput = if elapsed > 0.0 {
             (self.total_usb_bytes as f64 * 8.0) / (1_000_000.0 * elapsed)
         } else {
@@ -79,7 +78,10 @@ impl MetricsManager {
             0.0
         };
 
-        // Reset counters for next tick
+        // Get total drops from the global atomic (cumulative since start)
+        let total_drops = crate::decoder::TOTAL_DROPPED_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Reset counters for next tick (but NOT self.dropped_count as it's just a mirror)
         self.total_bytes = 0;
         self.total_usb_bytes = 0;
         self.frame_count = 0;
@@ -89,8 +91,8 @@ impl MetricsManager {
             throughput_mbps: throughput,
             pipeline_latency_ms: self.current_latency,
             fps_actual: fps,
-            frames_dropped: self.dropped_count,
-            buffer_health: 0.85, // Mock for now, will link to Jitter buffer later
+            frames_dropped: total_drops,
+            buffer_health: 0.85, 
         }
     }
 }

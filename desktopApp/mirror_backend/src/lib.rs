@@ -370,21 +370,18 @@ pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, width: u32, height: u32, timestamp: u64, _format: u32) -> i32 {
+    // 1. Write to the internal triple-buffer (used by local preview or other tools)
     if let Ok(mut state_lock) = STATE.lock() {
         if let Some(state) = state_lock.as_mut() {
-            let start = Instant::now();
             let slice = std::slice::from_raw_parts(data, len);
-            
-            if let Ok(_) = state.trbuff.write_frame(width, height, timestamp, slice) {
-                let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
-                m.record_frame(len, start.elapsed().as_millis() as u64);
-
-                obs_feed::write_frame(data, len, width, height, _format, timestamp);
-                return 0;
-            }
+            let _ = state.trbuff.write_frame(width, height, timestamp, slice);
         }
     }
-    -1
+
+    // 2. Write to the OBS-specific shared memory feed (Legacy path)
+    obs_feed::write_frame(data, len, width, height, _format, timestamp);
+    
+    0
 }
 
 #[no_mangle]

@@ -76,6 +76,11 @@ const rpc = defineElectrobunRPC('bun', {
                 console.log("Enterprise RPC: Disconnecting device");
                 return lib.symbols.force_disconnect();
             },
+            toggleObsFeed: (data: any) => {
+                console.log(`Enterprise RPC: OBS Feed toggled to ${data.enabled}`);
+                lib.symbols.toggle_obs_feed(data.enabled ? 1 : 0);
+                return { success: true };
+            },
             openNativePreview: async () => {
                 console.log("Enterprise RPC: Opening Native Preview (ffplay)");
                 const rootBytes = new TextEncoder().encode(projectRoot + "\0");
