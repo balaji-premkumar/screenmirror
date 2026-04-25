@@ -230,4 +230,3 @@ pub fn start_usb_loop(fd: i32) {
         set_state(AoaState::Idle);
     });
 }
-

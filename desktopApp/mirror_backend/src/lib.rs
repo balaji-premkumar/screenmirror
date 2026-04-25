@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use concurrent_queue::ConcurrentQueue;
 use once_cell::sync::Lazy;
-use shared_memory::{Shmem, ShmemConf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -62,7 +61,7 @@ pub extern "C" fn stop_mirror() -> i32 {
     // Reset termination signal for next start
     TERMINATION_SIGNAL.store(false, Ordering::SeqCst);
     
-    log_event("SUCCESS", "SYSTEM", "shutdown", "Mirroring session stopped and cleaned up.");
+    receiver::log_event("SUCCESS", "SYSTEM", "shutdown", "Mirroring session stopped and cleaned up.");
     0
 }
 

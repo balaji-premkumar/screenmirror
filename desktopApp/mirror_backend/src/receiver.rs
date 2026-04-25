@@ -178,12 +178,7 @@ impl Drop for StreamingActiveGuard {
     fn drop(&mut self) {
         let mut active = STREAMING_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         *active = false;
-        log_event(
-            "WARN",
-            "USB",
-            "streaming",
-            "Session guard dropped: Link state reset.",
-        );
+        log_event("WARN", "USB", "streaming", "Session guard dropped: Link state reset.");
     }
 }
 
@@ -275,7 +270,8 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
 
         let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer
         let mut demuxer = crate::demuxer::Demuxer::new();
-        let timeout_duration = Duration::from_millis(200); 
+        let mut last_activity = Instant::now();
+        let timeout_duration = Duration::from_millis(1000);
         
         loop {
             if crate::TERMINATION_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) {
@@ -318,6 +314,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
             // 3. Stream data from USB
             match handle.read_bulk(endpoint_in, &mut buf, timeout_duration) {
                 Ok(len) if len > 0 => {
+                    last_activity = Instant::now();
                     if let Ok(mut m) = crate::metrics::METRICS.lock() {
                         m.record_usb_bytes(len);
                     }
@@ -331,8 +328,17 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
                         }
                     }
                 }
-                Ok(_) | Err(rusb::Error::Timeout) => {
-                    // Loop to keep thread alive even if no video frames are arriving yet
+                Ok(_) => {
+                    if last_activity.elapsed() >= Duration::from_secs(5) {
+                        log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
+                        break;
+                    }
+                }
+                Err(rusb::Error::Timeout) => {
+                    if last_activity.elapsed() >= Duration::from_secs(5) {
+                        log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
+                        break;
+                    }
                 }
                 Err(e) => {
                     log_event("ERROR", "USB", "streaming", &format!("Fatal Read Error: {:?}. Closing link.", e));

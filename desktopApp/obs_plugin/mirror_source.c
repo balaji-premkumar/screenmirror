@@ -14,21 +14,7 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Mirror Team")
 OBS_MODULE_USE_DEFAULT_LOCALE("mirror-source", "en-US")
 
-/* ── Shared memory header — MUST match obs_feed.rs exactly ────────────────
- *
- *  Offset  Size  Field
- *  ------  ----  -----
- *    0      4    magic        "MIRR" (written inside seqlock window)
- *    4      4    seq          seqlock counter  (odd=write-in-progress, even=ready)
- *    8      4    width
- *   12      4    height
- *   16      4    format       0=BGRA  1=NV12  2=I420
- *   20      4    _pad
- *   24      8    timestamp
- *   32      8    frame_count  monotonically increasing
- *   40     24    _pad2
- *   64      *    pixel data   (up to 3840 * 2160 * 4 bytes)
- */
+/* ── Shared memory header — MUST match obs_feed.rs exactly ──────────────── */
 #define SHM_NAME         "obs_mirror_buffer"
 #define AUDIO_SHM_NAME   "/mirror_obs_audio"
 #define CONTROL_SIZE     64
@@ -77,9 +63,7 @@ struct mirror_source {
     int           shmem_fd;
     bool          shmem_open;
 
-    /* Local pixel buffer — allocated once in mirror_create at max 4K size.
-     * The seqlock reader copies SHM pixel data here before uploading to GPU,
-     * so the GPU never reads from a potentially torn SHM region. */
+    /* Local pixel buffer — allocated once in mirror_create at max 4K size. */
     uint8_t      *pixel_buf;
     size_t        pixel_buf_size;
 
@@ -276,9 +260,6 @@ static void *mirror_create(obs_data_t *settings, obs_source_t *source)
     ctx->texture         = NULL;
     ctx->last_slot_idx   = -1;
 
-    /* Allocate a permanent local pixel buffer large enough for any frame up to 4K.
-     * This avoids per-frame heap allocation and allows the seqlock reader to copy
-     * out of SHM before touching the GPU. */
     ctx->pixel_buf_size = MAX_FRAME_SIZE;
     ctx->pixel_buf      = bmalloc(ctx->pixel_buf_size);
     if (!ctx->pixel_buf) {
@@ -332,7 +313,7 @@ static void mirror_update(void *data, obs_data_t *settings)
 
     const char *new_shm = obs_data_get_string(settings, "shm_name");
     if (!new_shm || !*new_shm || !ctx->advanced) {
-        new_shm = SHM_NAME; // Force default if not advanced or empty
+        new_shm = SHM_NAME; 
     }
 
     if (!ctx->shm_name || strcmp(ctx->shm_name, new_shm) != 0) {
@@ -406,7 +387,6 @@ static void mirror_video_tick(void *data, float seconds)
     if (latest < 0 || latest > 2)
         return;
 
-    /* Skip if we've already rendered this specific slot update */
     if (latest == ctx->last_slot_idx)
         return;
 
@@ -432,22 +412,14 @@ static void mirror_video_tick(void *data, float seconds)
     if (data_size > ctx->pixel_buf_size)
         return;
 
-    size_t pixel_data_size = (size_t)w * (size_t)h * 4;
-
-    const uint8_t *shm_pixels = ctx->shmem_ptr + slot_offset + sizeof(struct mpro_frame_header);
+    const uint8_t *shm_pixels = ctx->shmem_ptr + slot_offset + SLOT_HEADER_SIZE;
     memcpy(ctx->pixel_buf, shm_pixels, data_size);
 
-    /* ── Double-check latest_index ───────────────────────────────────────── 
-     * Even with triple buffering, we want to ensure the writer didn't wrap 
-     * around and start writing TO OUR SLOT again. In high load, this is possible.
-     */
     int32_t latest_after = __atomic_load_n(&ctrl->latest_index, __ATOMIC_ACQUIRE);
     if (latest_after != latest) {
-        // Discard - the slot we just read might be in flux if the writer is very fast
         return;
     }
 
-    /* ── All good: upload coherent frame to GPU ─────────────────────────── */
     obs_enter_graphics();
     enum gs_color_format format = ctx->use_unorm ? GS_BGRA_UNORM : GS_BGRA;
 
@@ -460,11 +432,9 @@ static void mirror_video_tick(void *data, float seconds)
         ctx->current_fmt = format;
         ctx->last_w      = w;
         ctx->last_h      = h;
-        /* OBS queries size via mirror_get_width/height callbacks; no explicit notification needed */
-        blog(LOG_INFO, "[Mirror Source] Resolution: %ux%u fmt=%u", w, h, fmt);
+        blog(LOG_INFO, "[Mirror Source] Resolution: %ux%u fmt=%u", w, h, (uint32_t)format);
     }
 
-    /* Upload from local pixel_buf — the GPU never reads directly from SHM */
     gs_texture_set_image(ctx->texture, ctx->pixel_buf, w * 4, false);
     obs_leave_graphics();
 
@@ -474,7 +444,6 @@ static void mirror_video_tick(void *data, float seconds)
     ctx->last_h           = h;
 }
 
-
 static void mirror_video_render(void *data, gs_effect_t *effect)
 {
     struct mirror_source *ctx = data;
@@ -482,13 +451,16 @@ static void mirror_video_render(void *data, gs_effect_t *effect)
     if (!ctx->texture)
         return;
 
-    gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-    if (!eff) return;
-
-    bool previous = gs_framebuffer_srgb_enabled();
-    if (ctx->srgb_render) {
+    const bool linear_srgb = gs_get_linear_srgb();
+    const bool previous = gs_framebuffer_srgb_enabled();
+    
+    if (ctx->srgb_render || linear_srgb) {
         gs_enable_framebuffer_srgb(true);
     }
+
+    gs_effect_t *eff = obs_get_base_effect(linear_srgb
+                            ? OBS_EFFECT_DEFAULT_RECT
+                            : OBS_EFFECT_DEFAULT);
 
     gs_blend_state_push();
     gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
@@ -500,7 +472,8 @@ static void mirror_video_render(void *data, gs_effect_t *effect)
     }
 
     gs_blend_state_pop();
-    if (ctx->srgb_render) {
+    
+    if (ctx->srgb_render || linear_srgb) {
         gs_enable_framebuffer_srgb(previous);
     }
 }

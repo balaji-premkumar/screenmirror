@@ -151,6 +151,7 @@ pub fn init(width: u32, height: u32) -> bool {
 
     #[cfg(not(target_os = "linux"))]
     {
+        log_event("WARN", "OBS", "shmem", "OBS shared memory feed only supported on Linux");
         false
     }
 }
@@ -279,14 +280,10 @@ pub fn check_obs_installed() -> bool {
     #[cfg(target_os = "linux")]
     {
         // Native package
-        if std::process::Command::new("which")
-            .arg("obs")
+        if std::process::Command::new("which").arg("obs")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+            .status().map(|s| s.success()).unwrap_or(false) {
             return true;
         }
         // Flatpak
@@ -294,10 +291,7 @@ pub fn check_obs_installed() -> bool {
             .args(["info", "com.obsproject.Studio"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+            .status().map(|s| s.success()).unwrap_or(false) {
             return true;
         }
         // Snap
@@ -305,10 +299,7 @@ pub fn check_obs_installed() -> bool {
             .args(["list", "obs-studio"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+            .status().map(|s| s.success()).unwrap_or(false) {
             return true;
         }
         false
@@ -390,22 +381,12 @@ pub fn check_plugin_installed() -> bool {
 /// Build and install the OBS plugin.
 /// Returns 0 on success, -1 on failure.
 pub fn install_plugin(project_root: &str) -> i32 {
-    log_event(
-        "INFO",
-        "OBS",
-        "install",
-        &format!("Starting OBS plugin build & install (v{})...", PLUGIN_VERSION),
-    );
+    log_event("INFO", "OBS", "install", &format!("Starting OBS plugin build & install (v{})...", PLUGIN_VERSION));
 
     let plugin_dir = match get_obs_plugin_dir() {
         Some(d) => d,
         None => {
-            log_event(
-                "ERROR",
-                "OBS",
-                "install",
-                "Cannot find OBS plugin directory",
-            );
+            log_event("ERROR", "OBS", "install", "Cannot find OBS plugin directory");
             return -1;
         }
     };
@@ -413,7 +394,7 @@ pub fn install_plugin(project_root: &str) -> i32 {
     let source_dir = format!("{}/obs_plugin", project_root);
     let build_dir = format!("{}/build", source_dir);
 
-    // Ensure build directory exists
+    // Create build directory
     let _ = std::fs::create_dir_all(&build_dir);
 
     #[cfg(target_os = "linux")]
@@ -487,8 +468,17 @@ pub fn install_plugin(project_root: &str) -> i32 {
     0
 }
 
+/// Check whether ffplay is available (bundled or system).
+pub fn check_ffplay_available(project_root: &str) -> bool {
+    let bundled = format!("{}/bin/ffplay", project_root);
+    if std::path::Path::new(&bundled).exists() {
+        return true;
+    }
 
-/// Check whether native preview is available (now always true as it's built-in).
-pub fn check_ffplay_available(_project_root: &str) -> bool {
-    true
+    std::process::Command::new("which").arg("ffplay")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
