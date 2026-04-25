@@ -44,11 +44,7 @@ impl CircularBuffer {
         let packet_len = packet.len();
         if packet_len > self.size { return false; }
         
-        let available = if self.head >= self.tail { 
-            self.size - (self.head - self.tail) 
-        } else { 
-            self.tail - self.head 
-        };
+        let available = (self.tail + self.size - self.head - 1) % self.size;
         
         if packet_len > available { return false; }
 

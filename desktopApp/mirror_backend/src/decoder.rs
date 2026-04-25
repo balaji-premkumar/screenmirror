@@ -205,6 +205,8 @@ pub fn start_decoder_thread(queue: Arc<ConcurrentQueue<Vec<u8>>>) {
                 break;
             }
 
+            let mut current_packet = None;
+
             // Jitter Buffer: Drop old packets to reduce latency if backlog builds up.
             // With bounded(20), we allow some breathing room but clear if we hit 15.
             let queue_len = queue.len();
@@ -218,16 +220,15 @@ pub fn start_decoder_thread(queue: Arc<ConcurrentQueue<Vec<u8>>>) {
                     if let Ok(pkt) = queue.pop() {
                         dropped += 1;
                         // Check if this packet is a keyframe. 
-                        // In our framed protocol, payload starts at offset 9.
-                        // For HEVC, NAL header is 2 bytes. Type is (byte[0] >> 1) & 0x3F.
-                        if pkt.len() > 11 {
-                            let nal_type = (pkt[9] >> 1) & 0x3F;
+                        // In our framed protocol, the 9-byte transport header is stripped,
+                        // so the packet starts with the raw HEVC bitstream (Annex B).
+                        // For Annex B, the NAL header starts at index 4 (after 00 00 00 01).
+                        if pkt.len() > 6 {
+                            let nal_type = (pkt[4] >> 1) & 0x3F;
                             if nal_type == 19 || nal_type == 20 {
-                                // Found a keyframe! Stop dropping and keep this one as the new start.
-                                // Actually, we want to START from a keyframe.
-                                // So we drop EVERYTHING before this keyframe.
-                                // Re-push this keyframe to the front or just stop here.
-                                // For simplicity, if we hit a keyframe, we stop dropping.
+                                // Found a keyframe! Stop dropping and keep this one.
+                                dropped -= 1; // Do not count the keyframe as dropped
+                                current_packet = Some(pkt);
                                 break;
                             }
                         }
@@ -248,25 +249,15 @@ pub fn start_decoder_thread(queue: Arc<ConcurrentQueue<Vec<u8>>>) {
                 }
             }
 
-            // Blocking pop instead of busy loop with sleep(1ms)
-            match queue.pop() {
-                Ok(packet_data) => {
-                    let timestamp = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    if let Err(_) = decoder.decode_and_push(&packet_data, timestamp) {
-                        // Errors are logged inside decode_and_push
-                    }
+            let packet_to_decode = current_packet.or_else(|| queue.pop().ok());
+
+            if let Some(packet_data) = packet_to_decode {
+                let timestamp = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+                if let Err(_) = decoder.decode_and_push(&packet_data, timestamp) {
+                    // Errors are logged inside decode_and_push
                 }
-                Err(_) => {
-                    // Queue closed/empty - this blocking pop will return Err if closed,
-                    // but ConcurrentQueue::pop is not actually blocking for 'pop'.
-                    // We need a way to wait. Since ConcurrentQueue doesn't have a blocking pop,
-                    // we can use a small sleep but we should actually use a channel or a queue
-                    // that supports blocking.
-                    // Wait, ConcurrentQueue::pop is non-blocking. 
-                    // Let's use std::thread::park/unpark or just keep the sleep but make it better, 
-                    // or better yet, switch to crossbeam-channel.
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
     });
