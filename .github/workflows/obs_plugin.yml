@@ -1,12 +1,7 @@
 name: Build OBS Plugin
 
 on:
-  push:
-    paths:
-      - 'desktopApp/obs_plugin/**'
-  pull_request:
-    paths:
-      - 'desktopApp/obs_plugin/**'
+  workflow_call:
   workflow_dispatch:
 
 jobs:
@@ -43,5 +38,4 @@ jobs:
         run: |
           # Note: This requires OBS headers and libobs.lib. 
           # In a real environment, you'd download the OBS SDK.
-          # For now, we'll mark this as a placeholder for the SDK integration.
           echo "Windows OBS Plugin build requires OBS SDK"

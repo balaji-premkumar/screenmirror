@@ -1,12 +1,7 @@
 name: Build Mobile App
 
 on:
-  push:
-    paths:
-      - 'mobileApp/**'
-  pull_request:
-    paths:
-      - 'mobileApp/**'
+  workflow_call:
   workflow_dispatch:
 
 jobs:
@@ -30,18 +25,18 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-andreoide, i686-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
       - name: Flutter Pub Get
         run: flutter pub get
-        dir_path: mobileApp
+        working-directory: mobileApp
 
       - name: Build Android APK
         run: flutter build apk --release
-        dir_path: mobileApp
+        working-directory: mobileApp
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
