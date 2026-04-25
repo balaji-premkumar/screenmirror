@@ -1,12 +1,11 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.tsx'
+import App from './App'
 import './index.css'
 import { Electroview } from "electrobun/view";
 
 // Initialize the Electrobun bridge for RPC and messaging
 const rpc = Electroview.defineRPC({
-    role: 'view',
     handlers: {
         requests: {
             // These would be requests FROM Bun TO View (currently unused)

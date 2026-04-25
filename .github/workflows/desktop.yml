@@ -1,0 +1,59 @@
+name: Build Desktop App
+
+on:
+  push:
+    paths:
+      - 'desktopApp/**'
+  pull_request:
+    paths:
+      - 'desktopApp/**'
+  workflow_dispatch:
+
+jobs:
+  build_desktop:
+    name: Build Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.0-dev build-essential libssl-dev libavcodec-dev libavformat-dev libswscale-dev libavutil-dev
+
+      - name: Install JS dependencies
+        run: bun install
+        working-directory: desktopApp
+
+      - name: Build Rust Backend
+        run: cargo build --release
+        working-directory: desktopApp/mirror_backend
+
+      - name: Bundle Native Libraries
+        run: bash scripts/bundle.sh
+        working-directory: desktopApp
+
+      - name: Build Electrobun App
+        run: bun run build:vite && npx electrobun build
+        working-directory: desktopApp
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-desktop-${{ matrix.os }}
+          path: |
+            desktopApp/build/
+            desktopApp/bin/
+            desktopApp/mirror_backend/target/release/libmirror_backend.*
+            desktopApp/mirror_backend/target/release/mirror_backend.dll

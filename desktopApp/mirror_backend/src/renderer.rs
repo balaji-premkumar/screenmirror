@@ -73,7 +73,7 @@ pub fn start_native_preview(_project_root: &str) {
                 }
             };
 
-        let mut canvas = match window.into_canvas().accelerated().present_vsync().build() {
+        let mut canvas = match window.into_canvas().accelerated().build() {
             Ok(c) => c,
             Err(e) => {
                 log_event("ERROR", "PREVIEW", "sdl2", &format!("Canvas creation failed: {}", e));
@@ -101,6 +101,11 @@ pub fn start_native_preview(_project_root: &str) {
         let mut is_fullscreen = false;
 
         'running: loop {
+            if crate::TERMINATION_SIGNAL.load(Ordering::Relaxed) {
+                log_event("INFO", "PREVIEW", "sdl2", "Preview thread receiving termination signal.");
+                break 'running;
+            }
+
             for event in event_pump.poll_iter() {
                 match event {
                     Event::Quit { .. }

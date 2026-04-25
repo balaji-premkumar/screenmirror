@@ -51,7 +51,7 @@ impl AudioCapture {
             .set_channel_count::<Mono>()
             .set_performance_mode(PerformanceMode::LowLatency)
             .set_sharing_mode(SharingMode::Exclusive)
-            .set_input_preset(InputPreset::VoiceRecognition)
+            .set_input_preset(InputPreset::Camcorder)
             .set_callback(callback)
             .open_stream()
             .map_err(|e| anyhow::anyhow!("Failed to open audio stream: {:?}", e))?;

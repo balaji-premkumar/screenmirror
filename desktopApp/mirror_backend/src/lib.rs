@@ -7,24 +7,32 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub mod audio;
+pub mod audio_engine;
 pub mod decoder;
 pub mod demuxer;
 pub mod metrics;
 pub mod obs_feed;
 pub mod receiver;
 pub mod renderer;
+pub mod shared_mem;
+pub mod video_processing;
 
 #[repr(C)]
 pub struct FrameHeader {
     pub magic: [u8; 4],
     pub width: u32,
     pub height: u32,
-    pub format: u32, // 0 = BGRA, 1 = NV12, 2 = I420
     pub timestamp: u64,
+    pub data_size: u32,
+    pub _pad: [u8; 8],
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub static TERMINATION_SIGNAL: AtomicBool = AtomicBool::new(false);
+
 pub struct MirrorState {
-    pub shmem: Shmem,
+    pub trbuff: Arc<shared_mem::TripleBufferManager>,
     pub queue: Arc<ConcurrentQueue<Vec<u8>>>,
     pub width: u32,
     pub height: u32,
@@ -33,7 +41,30 @@ pub struct MirrorState {
 unsafe impl Send for MirrorState {}
 unsafe impl Sync for MirrorState {}
 
+// Split the state to avoid holding a heavy lock on everything
 pub static STATE: Lazy<Mutex<Option<MirrorState>>> = Lazy::new(|| Mutex::new(None));
+
+#[no_mangle]
+pub extern "C" fn stop_mirror() -> i32 {
+    TERMINATION_SIGNAL.store(true, Ordering::SeqCst);
+    
+    // Give threads a moment to see the signal
+    std::thread::sleep(Duration::from_millis(100));
+    
+    // Clear state
+    if let Ok(mut state_lock) = STATE.lock() {
+        *state_lock = None;
+    }
+    
+    // Cleanup OBS SHM
+    obs_feed::cleanup();
+    
+    // Reset termination signal for next start
+    TERMINATION_SIGNAL.store(false, Ordering::SeqCst);
+    
+    log_event("SUCCESS", "SYSTEM", "shutdown", "Mirroring session stopped and cleaned up.");
+    0
+}
 
 #[no_mangle]
 pub extern "C" fn open_native_preview(project_root: *const libc::c_char) -> i32 {
@@ -319,23 +350,12 @@ pub extern "C" fn setup_linux_permissions() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
-    let header_size = std::mem::size_of::<FrameHeader>();
-    // Allocate enough for any frame up to 4K, not just the init dimensions.
-    // Decoded frames from phones can be portrait or higher-res.
-    let max_data_size = 3840 * 2160 * 4; // 4K UHD BGRA
-    let total_size = header_size + max_data_size;
-    let shmem = match ShmemConf::new()
-        .size(total_size)
-        .os_id("obs_mirror_buffer")
-        .create()
-    {
-        Ok(s) => s,
-        Err(_) => match ShmemConf::new().os_id("obs_mirror_buffer").open() {
-            Ok(s) => s,
-            Err(_) => return -1,
-        },
+    let trbuff = match shared_mem::TripleBufferManager::create("obs_mirror_buffer") {
+        Ok(t) => Arc::new(t),
+        Err(_) => return -1,
     };
-    let queue = Arc::new(ConcurrentQueue::bounded(2));
+    
+    let queue = Arc::new(ConcurrentQueue::bounded(20));
     decoder::start_decoder_thread(queue.clone());
     receiver::start_usb_listener_thread();
 
@@ -344,7 +364,7 @@ pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
 
     if let Ok(mut state_lock) = STATE.lock() {
         *state_lock = Some(MirrorState {
-            shmem,
+            trbuff,
             queue,
             width,
             height,
@@ -354,37 +374,20 @@ pub extern "C" fn init_mirror(width: u32, height: u32) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, width: u32, height: u32, timestamp: u64, format: u32) -> i32 {
+pub unsafe extern "C" fn write_frame_to_obs(data: *const u8, len: usize, width: u32, height: u32, timestamp: u64, _format: u32) -> i32 {
     if let Ok(mut state_lock) = STATE.lock() {
         if let Some(state) = state_lock.as_mut() {
             let start = Instant::now();
-            let header_size = std::mem::size_of::<FrameHeader>();
+            let slice = std::slice::from_raw_parts(data, len);
+            
+            if let Ok(_) = state.trbuff.write_frame(width, height, timestamp, slice) {
+                let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
+                m.record_frame(len, start.elapsed().as_millis() as u64);
 
-            let ptr = state.shmem.as_ptr();
-            let header = FrameHeader {
-                magic: *b"MIRR",
-                width,
-                height,
-                format,
-                timestamp,
-            };
-            std::ptr::copy_nonoverlapping(
-                &header as *const FrameHeader as *const u8,
-                ptr,
-                header_size,
-            );
-            let data_ptr = ptr.add(header_size);
-            let available = state.shmem.len() - header_size;
-            let copy_len = len.min(available);
-            std::ptr::copy_nonoverlapping(data, data_ptr, copy_len);
-
-            let mut m = metrics::METRICS.lock().unwrap_or_else(|e| e.into_inner());
-            m.record_frame(len, start.elapsed().as_millis() as u64);
-
-            // Also push to OBS shared memory feed if enabled
-            obs_feed::write_frame(data, len, width, height, format, timestamp);
-
-            return 0;
+                // Also push to OBS shared memory feed if enabled (Legacy path)
+                obs_feed::write_frame(data, len, width, height, _format, timestamp);
+                return 0;
+            }
         }
     }
     -1

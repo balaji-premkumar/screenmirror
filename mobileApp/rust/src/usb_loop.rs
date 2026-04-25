@@ -54,6 +54,8 @@ impl Drop for MetricsGuard {
     }
 }
 
+pub static PIPELINE_RUNNING: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+
 pub fn start_usb_loop(fd: i32) {
     // Guard against multiple starts
     {
@@ -76,7 +78,7 @@ pub fn start_usb_loop(fd: i32) {
 
     let read_fd = fd;
     std::thread::spawn(move || {
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 4096];
         loop {
             // Check if we should still be active
             {
@@ -86,9 +88,25 @@ pub fn start_usb_loop(fd: i32) {
 
             let len = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if len > 0 {
-                if let Ok(json_str) = std::str::from_utf8(&buf[..len as usize]) {
-                    if let Ok(mut lock) = crate::api::LATEST_CONFIG.lock() {
-                        *lock = Some(json_str.to_string());
+                if let Ok(full_str) = std::str::from_utf8(&buf[..len as usize]) {
+                    // Desktop might send multiple JSON objects in one packet or separate packets
+                    // Split by null terminator if present, or just try to find JSON boundaries
+                    for part in full_str.split('\0').filter(|s| !s.trim().is_empty()) {
+                        // Update the config queue for Dart to poll
+                        if let Ok(mut lock) = crate::api::LATEST_CONFIG.lock() {
+                            lock.push(part.to_string());
+                        }
+
+                        // Also update PIPELINE_RUNNING directly for faster response in the rust thread
+                        if part.contains("\"command\":\"start\"") {
+                            if let Ok(mut run) = PIPELINE_RUNNING.lock() {
+                                *run = true;
+                            }
+                        } else if part.contains("\"command\":\"stop\"") {
+                            if let Ok(mut run) = PIPELINE_RUNNING.lock() {
+                                *run = false;
+                            }
+                        }
                     }
                 }
             } else if len < 0 {
@@ -108,7 +126,7 @@ pub fn start_usb_loop(fd: i32) {
 
     std::thread::spawn(move || {
         let _m_guard = MetricsGuard;
-        let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>();
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(2);
         let muxer = Arc::new(Mutex::new(Muxer::new(frame_tx)));
 
         {
@@ -117,11 +135,7 @@ pub fn start_usb_loop(fd: i32) {
         }
 
         let muxer_clone = muxer.clone();
-        let _audio_handle = AudioCapture::start(move |pcm_data: &[u8]| {
-            if let Ok(mut m) = muxer_clone.lock() {
-                m.push_audio(pcm_data);
-            }
-        });
+        let mut audio_handle: Option<AudioCapture> = None;
 
         set_state(AoaState::Streaming);
 
@@ -130,12 +144,37 @@ pub fn start_usb_loop(fd: i32) {
         let mut frames_sent = 0;
 
         loop {
-            match frame_rx.recv_timeout(Duration::from_millis(500)) {
+            // Check if pipeline should be running
+            let is_running = *PIPELINE_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+            
+            if is_running && audio_handle.is_none() {
+                // Start audio capture when pipeline starts
+                let m_clone = muxer_clone.clone();
+                match AudioCapture::start(move |pcm_data: &[u8]| {
+                    if let Ok(mut m) = m_clone.lock() {
+                        m.push_audio(pcm_data);
+                    }
+                }) {
+                    Ok(handle) => audio_handle = Some(handle),
+                    Err(e) => set_state(AoaState::Error(format!("Audio start failed: {:?}", e))),
+                }
+            } else if !is_running && audio_handle.is_some() {
+                // Stop audio capture when pipeline stops
+                audio_handle = None; // Dropping AudioCapture stops it
+            }
+
+            match frame_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(frame) => {
                     let frame_len = frame.len();
                     let written = unsafe {
                         libc::write(fd, frame.as_ptr() as *const libc::c_void, frame_len)
                     };
+                    
+                    let frame_type_video = frame_len > 9 && frame[4] == 0x01;
+                    
+                    // Release back to pool
+                    Muxer::release_buffer(frame);
+
                     if written <= 0 {
                         let errno = std::io::Error::last_os_error();
                         set_state(AoaState::Error(format!("USB write failed: {}", errno)));
@@ -143,7 +182,7 @@ pub fn start_usb_loop(fd: i32) {
                     }
 
                     bytes_sent += written as usize;
-                    if frame_len > 9 && frame[4] == 0x01 {
+                    if frame_type_video {
                         frames_sent += 1;
                     }
 
@@ -171,6 +210,10 @@ pub fn start_usb_loop(fd: i32) {
         }
 
         {
+            let mut run = PIPELINE_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+            *run = false;
+        }
+        {
             let mut global = GLOBAL_MUXER.lock().unwrap_or_else(|e| e.into_inner());
             *global = None;
         }
@@ -187,3 +230,4 @@ pub fn start_usb_loop(fd: i32) {
         set_state(AoaState::Idle);
     });
 }
+

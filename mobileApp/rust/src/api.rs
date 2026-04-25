@@ -43,9 +43,24 @@ impl CircularBuffer {
     pub fn push(&mut self, packet: &[u8]) -> bool {
         let packet_len = packet.len();
         if packet_len > self.size { return false; }
-        let available = if self.head >= self.tail { self.size - (self.head - self.tail) } else { self.tail - self.head };
+        
+        let available = if self.head >= self.tail { 
+            self.size - (self.head - self.tail) 
+        } else { 
+            self.tail - self.head 
+        };
+        
         if packet_len > available { return false; }
-        for &byte in packet { self.data[self.head] = byte; self.head = (self.head + 1) % self.size; }
+
+        let space_at_end = self.size - self.head;
+        if packet_len <= space_at_end {
+            self.data[self.head..self.head + packet_len].copy_from_slice(packet);
+        } else {
+            self.data[self.head..self.head + space_at_end].copy_from_slice(&packet[..space_at_end]);
+            self.data[0..packet_len - space_at_end].copy_from_slice(&packet[space_at_end..]);
+        }
+        
+        self.head = (self.head + packet_len) % self.size;
         true
     }
 }
@@ -67,12 +82,14 @@ pub fn push_to_usb(data: Vec<u8>) -> bool {
     success
 }
 
-pub static LATEST_CONFIG: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+pub static LATEST_CONFIG: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[frb(sync)]
 pub fn poll_config() -> Option<String> {
     if let Ok(mut config) = LATEST_CONFIG.lock() {
-        return config.take();
+        if !config.is_empty() {
+            return Some(config.remove(0));
+        }
     }
     None
 }

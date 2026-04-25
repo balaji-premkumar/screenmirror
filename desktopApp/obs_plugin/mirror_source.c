@@ -29,33 +29,34 @@ OBS_MODULE_USE_DEFAULT_LOCALE("mirror-source", "en-US")
  *   40     24    _pad2
  *   64      *    pixel data   (up to 3840 * 2160 * 4 bytes)
  */
-#define SHM_NAME         "/mirror_obs_feed"
+#define SHM_NAME         "obs_mirror_buffer"
 #define AUDIO_SHM_NAME   "/mirror_obs_audio"
-#define HEADER_SIZE      64          /* must equal SHM_PIXEL_OFFSET in obs_feed.rs */
-#define MAX_PIXEL_DATA   (3840 * 2160 * 4)
+#define CONTROL_SIZE     64
+#define SLOT_HEADER_SIZE 64
+#define MAX_WIDTH        3840
+#define MAX_HEIGHT       2160
+#define MAX_FRAME_SIZE   (MAX_WIDTH * MAX_HEIGHT * 4)
+#define SLOT_SIZE        (SLOT_HEADER_SIZE + MAX_FRAME_SIZE)
 #define AUDIO_BUFFER_SAMPLES 96000
 
-struct shm_header {
-    char     magic[4];       /* offset  0 */
-    uint32_t seq;            /* offset  4  — seqlock counter              */
-    uint32_t width;          /* offset  8                                 */
-    uint32_t height;         /* offset 12                                 */
-    uint32_t format;         /* offset 16  — 0=BGRA 1=NV12 2=I420        */
-    uint32_t _pad;           /* offset 20                                 */
-    uint64_t timestamp;      /* offset 24                                 */
-    uint64_t frame_count;    /* offset 32                                 */
-    uint8_t  _pad2[24];      /* offset 40  — pad to 64-byte cache line   */
-    /* pixel data follows at offset 64 */
+struct shm_control {
+    char     magic[4];       /* "MPRO" */
+    int32_t  latest_index;   /* -1, 0, 1, or 2 */
+    uint8_t  _pad[56];
+};
+
+struct mpro_frame_header {
+    char     magic[4];       /* "MIRR" */
+    uint32_t width;
+    uint32_t height;
+    uint64_t timestamp;
+    uint32_t data_size;
+    uint8_t  _pad[8];        /* Pad to 32 bytes */
 };
 
 /* Compile-time layout verification — catches mismatches between Rust and C */
-_Static_assert(sizeof(struct shm_header) == 64,   "shm_header must be 64 bytes");
-_Static_assert(offsetof(struct shm_header, seq)         ==  4, "seq offset wrong");
-_Static_assert(offsetof(struct shm_header, width)       ==  8, "width offset wrong");
-_Static_assert(offsetof(struct shm_header, height)      == 12, "height offset wrong");
-_Static_assert(offsetof(struct shm_header, format)      == 16, "format offset wrong");
-_Static_assert(offsetof(struct shm_header, timestamp)   == 24, "timestamp offset wrong");
-_Static_assert(offsetof(struct shm_header, frame_count) == 32, "frame_count offset wrong");
+_Static_assert(sizeof(struct shm_control) == 64, "shm_control must be 64 bytes");
+_Static_assert(sizeof(struct mpro_frame_header) == 32, "mpro_frame_header must be 32 bytes");
 
 struct audio_shm_header {
     char     magic[4];
@@ -101,6 +102,7 @@ struct mirror_source {
     bool          srgb_render;
 
     pthread_t     audio_thread;
+    int32_t       last_slot_idx;
     bool          thread_active;
 };
 
@@ -170,7 +172,7 @@ static bool try_open_shmem(struct mirror_source *ctx)
         int fd = shm_open(ctx->shm_name, O_RDONLY, 0);
         if (fd >= 0) {
             struct stat st;
-            if (fstat(fd, &st) == 0 && st.st_size >= (off_t)HEADER_SIZE) {
+            if (fstat(fd, &st) == 0 && st.st_size >= (off_t)CONTROL_SIZE) {
                 void *ptr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
                 if (ptr != MAP_FAILED) {
                     ctx->shmem_ptr  = (uint8_t *)ptr;
@@ -272,13 +274,12 @@ static void *mirror_create(obs_data_t *settings, obs_source_t *source)
     ctx->audio_shm_open  = false;
     ctx->audio_tail      = 0;
     ctx->texture         = NULL;
-    ctx->last_timestamp  = 0;
-    ctx->last_frame_count = 0;
+    ctx->last_slot_idx   = -1;
 
     /* Allocate a permanent local pixel buffer large enough for any frame up to 4K.
      * This avoids per-frame heap allocation and allows the seqlock reader to copy
      * out of SHM before touching the GPU. */
-    ctx->pixel_buf_size = MAX_PIXEL_DATA;
+    ctx->pixel_buf_size = MAX_FRAME_SIZE;
     ctx->pixel_buf      = bmalloc(ctx->pixel_buf_size);
     if (!ctx->pixel_buf) {
         blog(LOG_ERROR, "[Mirror Source] Failed to allocate pixel buffer (%zu bytes)", ctx->pixel_buf_size);
@@ -399,80 +400,50 @@ static void mirror_video_tick(void *data, float seconds)
         return;
     }
 
-    if (ctx->shmem_size < HEADER_SIZE)
+    const struct shm_control *ctrl = (const struct shm_control *)ctx->shmem_ptr;
+    int32_t latest = __atomic_load_n(&ctrl->latest_index, __ATOMIC_ACQUIRE);
+
+    if (latest < 0 || latest > 2)
         return;
 
-    if (!ctx->pixel_buf)
+    /* Skip if we've already rendered this specific slot update */
+    if (latest == ctx->last_slot_idx)
         return;
 
-    const struct shm_header *hdr = (const struct shm_header *)ctx->shmem_ptr;
-
-    /* ── Seqlock reader ────────────────────────────────────────────────────
-     *
-     *  We do NOT spin: if a write is in-progress we skip this tick entirely.
-     *  OBS will call us again in ~16 ms, so at worst we display the previous
-     *  frame for one extra frame period — far better than tearing.
-     *
-     *  1. Load seq atomically (acquire).  Must be even (write complete).
-     *  2. Copy all fields we care about into local variables and pixel_buf.
-     *  3. Acquire fence.
-     *  4. Load seq again.  If it changed, the writer overwrote us — discard.
-     */
-    uint32_t seq1 = __atomic_load_n(&hdr->seq, __ATOMIC_ACQUIRE);
-    if (seq1 & 1) {
-        /* Writer is currently updating the buffer — skip this tick */
+    size_t slot_offset = CONTROL_SIZE + (latest * SLOT_SIZE);
+    if (ctx->shmem_size < slot_offset + SLOT_HEADER_SIZE)
         return;
-    }
 
-    /* Read header fields into locals while seq1 is valid */
-    char     magic[4];
-    uint32_t w, h, fmt;
-    uint64_t ts, frame_count;
-
-    memcpy(magic, hdr->magic, 4);
-    w           = hdr->width;
-    h           = hdr->height;
-    fmt         = hdr->format;
-    ts          = hdr->timestamp;
-    frame_count = hdr->frame_count;
-
-    /* Sanity check before computing pixel_data_size */
+    const struct mpro_frame_header *fhdr = (const struct mpro_frame_header *)(ctx->shmem_ptr + slot_offset);
+    
+    char magic[4];
+    memcpy(magic, fhdr->magic, 4);
     if (memcmp(magic, "MIRR", 4) != 0)
         return;
-    if (w == 0 || h == 0 || w > 7680 || h > 4320)
+
+    uint32_t w = fhdr->width;
+    uint32_t h = fhdr->height;
+    uint64_t ts = fhdr->timestamp;
+    uint32_t data_size = fhdr->data_size;
+
+    if (w == 0 || h == 0 || w > MAX_WIDTH || h > MAX_HEIGHT)
+        return;
+
+    if (data_size > ctx->pixel_buf_size)
         return;
 
     size_t pixel_data_size = (size_t)w * (size_t)h * 4;
 
-    /* Check SHM is large enough (re-open if needed to pick up a resize) */
-    if (ctx->shmem_size < HEADER_SIZE + pixel_data_size) {
-        close_shmem(ctx);
-        if (!try_open_shmem(ctx))
-            return;
-        if (ctx->shmem_size < HEADER_SIZE + pixel_data_size)
-            return;
-        /* Re-point hdr after remap */
-        hdr = (const struct shm_header *)ctx->shmem_ptr;
-    }
+    const uint8_t *shm_pixels = ctx->shmem_ptr + slot_offset + sizeof(struct mpro_frame_header);
+    memcpy(ctx->pixel_buf, shm_pixels, data_size);
 
-    /* Skip if frame hasn't advanced since last tick */
-    if (frame_count == ctx->last_frame_count && ctx->texture)
-        return;
-
-    /* Copy pixel data into our local buffer while still in the seqlock window */
-    if (pixel_data_size > ctx->pixel_buf_size)
-        return; /* Should never happen — pixel_buf is sized for 4K */
-
-    const uint8_t *shm_pixels = ctx->shmem_ptr + HEADER_SIZE;
-    memcpy(ctx->pixel_buf, shm_pixels, pixel_data_size);
-
-    /* ── Seqlock validation ─────────────────────────────────────────────── */
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    uint32_t seq2 = __atomic_load_n(&hdr->seq, __ATOMIC_ACQUIRE);
-    if (seq1 != seq2) {
-        /* Writer started (or completed another write) while we were copying.
-         * Our local copy may be torn — discard this frame, keep last texture. */
-        blog(LOG_DEBUG, "[Mirror Source] Seqlock retry: seq %u -> %u (frame discarded)", seq1, seq2);
+    /* ── Double-check latest_index ───────────────────────────────────────── 
+     * Even with triple buffering, we want to ensure the writer didn't wrap 
+     * around and start writing TO OUR SLOT again. In high load, this is possible.
+     */
+    int32_t latest_after = __atomic_load_n(&ctrl->latest_index, __ATOMIC_ACQUIRE);
+    if (latest_after != latest) {
+        // Discard - the slot we just read might be in flux if the writer is very fast
         return;
     }
 
@@ -498,11 +469,9 @@ static void mirror_video_tick(void *data, float seconds)
     obs_leave_graphics();
 
     ctx->last_timestamp   = ts;
-    ctx->last_frame_count = frame_count;
+    ctx->last_slot_idx    = latest;
     ctx->last_w           = w;
     ctx->last_h           = h;
-
-    UNUSED_PARAMETER(fmt);
 }
 
 

@@ -1,0 +1,50 @@
+name: Build Mobile App
+
+on:
+  push:
+    paths:
+      - 'mobileApp/**'
+  pull_request:
+    paths:
+      - 'mobileApp/**'
+  workflow_dispatch:
+
+jobs:
+  build_android:
+    name: Build Android App
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-andreoide, i686-linux-android, x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+        dir_path: mobileApp
+
+      - name: Build Android APK
+        run: flutter build apk --release
+        dir_path: mobileApp
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-companion-apk
+          path: mobileApp/build/app/outputs/flutter-apk/app-release.apk
