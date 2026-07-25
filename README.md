@@ -180,6 +180,15 @@ cd mobileApp && flutter analyze
 
 Distributed under the MIT License. See [LICENSE](LICENSE).
 
+### Third-party components
+
+ScreenMirror itself is MIT, but it builds against FFmpeg, which is **LGPL 2.1+** (or GPL, if your FFmpeg was configured with `--enable-gpl`). Two things follow from that:
+
+- The Rust backend **dynamically links** the system FFmpeg libraries, and `ffplay` is launched as a **separate process**. Neither imposes GPL terms on this project.
+- If you redistribute a build that **statically links** FFmpeg, or that bundles a GPL-configured FFmpeg, those terms apply to what you ship. Check before packaging binaries.
+
+The OBS plugin links `libobs` (GPL 2.0+), so that plugin binary is subject to GPL terms when distributed. The plugin is a separate artifact from the desktop app.
+
 ---
 
 ## 🌟 Acknowledgments
