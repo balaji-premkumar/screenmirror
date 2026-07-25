@@ -1,0 +1,120 @@
+name: 🐞 Bug report
+description: Something is broken or behaves differently than documented
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file this.
+
+        Most reports here come down to hardware and platform specifics — the
+        phone model, the Android version and the host OS matter more than
+        usual for a USB project, so please fill those in even if the bug
+        seems unrelated to them.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+      placeholder: |
+        Expected: the stream to start after pressing Start.
+        Actual: the dashboard stayed on "Waiting for USB connection".
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch the desktop app
+        2. Plug in the phone and accept the accessory dialog
+        3. Press Start
+        4. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part is affected?
+      options:
+        - Desktop app (dashboard / connection)
+        - Player (ffplay window, video or audio)
+        - OBS plugin / shared memory
+        - Android companion app
+        - USB connection / drivers / permissions
+        - Build or installation
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host-os
+    attributes:
+      label: Desktop OS
+      options:
+        - Linux
+        - Windows
+        - macOS
+    validations:
+      required: true
+
+  - type: input
+    id: host-os-detail
+    attributes:
+      label: Desktop OS version
+      placeholder: "Ubuntu 26.04 / Windows 11 23H2 / macOS 15.2"
+    validations:
+      required: true
+
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model and Android version
+      description: AOA support varies between vendors, so the exact model helps.
+      placeholder: "Pixel 8 Pro, Android 15"
+    validations:
+      required: true
+
+  - type: input
+    id: ffmpeg
+    attributes:
+      label: FFmpeg version
+      description: Output of `ffmpeg -version` (first line).
+      placeholder: "ffmpeg version 8.0.1"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Desktop logs
+      description: |
+        From `~/.mirror_stream/logs/mirror_rust.log.json`
+        (`%USERPROFILE%\.mirror_stream\logs\` on Windows).
+        The last 50 or so lines around the failure are usually enough.
+        This is rendered as a code block — no backticks needed.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: logcat
+    attributes:
+      label: Android logs (if the phone side is involved)
+      description: "`adb logcat -s MirrorService MirrorUSB` — only if you already have adb set up; it is not required to use the app."
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a duplicate
+          required: true
+        - label: I am on the latest `master` (or I have stated my version above)
+          required: false

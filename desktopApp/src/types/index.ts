@@ -10,11 +10,16 @@ export interface LogEntry {
 
 export interface Metrics {
   throughput_mbps: number;
-  pipeline_latency_ms: number;
+  /** Decode + colour conversion + sink write. Not end-to-end latency: that
+   *  needs a capture timestamp on the wire (ISSUES.md item 1). */
+  decode_latency_ms: number;
   fps_actual: number;
   frames_dropped: number;
   buffer_health: number;
 }
+
+/** 0 = stopped, 1 = starting (waiting for a keyframe), 2 = playing */
+export type PlayerState = 0 | 1 | 2;
 
 export interface StatusUpdate {
   bufferSize: number;
@@ -24,6 +29,9 @@ export interface StatusUpdate {
   newLogs: LogEntry[];
   metrics: Metrics;
   driverOk: boolean;
+  /** OBS Studio process detected right now */
+  obsRunning: boolean;
+  playerState: PlayerState;
 }
 
 export interface StartupChecks {

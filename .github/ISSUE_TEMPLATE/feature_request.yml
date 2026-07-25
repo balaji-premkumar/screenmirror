@@ -1,0 +1,60 @@
+name: ✨ Feature request
+description: Suggest a capability or improvement
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [ISSUES.md](https://github.com/balaji-premkumar/screenmirror/blob/master/ISSUES.md) first — the larger
+        roadmap items (source timestamps, zero-copy GPU path, dynamic
+        rotation, per-packet CRC, signed Windows driver) are already tracked
+        there.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation you are in, not the solution you have in mind.
+      placeholder: "When I rotate my phone mid-session, the aspect ratio stays wrong until I restart the stream."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part would this affect?
+      multiple: true
+      options:
+        - Desktop app / UI
+        - Rust backend / pipeline
+        - Player (ffplay)
+        - OBS plugin
+        - Android companion app
+        - Transport / AOA protocol
+        - Build, packaging or CI
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including existing tools that already do this, and why they do not fit.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to work on this
+          required: false

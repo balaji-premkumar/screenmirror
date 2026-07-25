@@ -1,132 +1,264 @@
+use crate::pipeline::VideoQueue;
 use crate::receiver::log_event;
-use crate::write_frame_to_obs;
-use concurrent_queue::ConcurrentQueue;
 use ffmpeg::codec::{decoder, packet};
-use ffmpeg::software::scaling::{context::Context, flag};
+use ffmpeg::software::scaling::{context::Context as ScaleContext, flag};
 use ffmpeg::util::format::pixel::Pixel;
 use ffmpeg_next as ffmpeg;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // Global metrics
 static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_DROPPED_FRAMES: AtomicU64 = AtomicU64::new(0);
-pub static MINUTE_DROPPED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// The hardware pixel format negotiated for this session (as raw
+/// AVPixelFormat value), or -1 when decoding in software.
+static TARGET_HW_FMT: AtomicI32 = AtomicI32::new(-1);
+
+/// Custom get_format callback: pick the negotiated hardware format when the
+/// decoder offers it, otherwise fall back to the first (software) entry.
+/// Without this callback libavcodec always picks a software format, even
+/// with hw_device_ctx set.
+unsafe extern "C" fn get_hw_format(
+    _ctx: *mut ffmpeg::ffi::AVCodecContext,
+    fmts: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    let target = TARGET_HW_FMT.load(Ordering::Relaxed);
+    let mut p = fmts;
+    while (*p) as i32 != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE as i32 {
+        if (*p) as i32 == target {
+            return *p;
+        }
+        p = p.add(1);
+    }
+    // Target not offered — take the decoder's first (software) choice.
+    *fmts
+}
+
+/// Try to create a hardware device context for this platform.
+/// Returns (device_ctx, hw_pixel_format) on success.
+unsafe fn create_hw_device() -> Option<(*mut ffmpeg::ffi::AVBufferRef, i32)> {
+    use ffmpeg::ffi::*;
+
+    let candidates: &[(AVHWDeviceType, AVPixelFormat, &str)] = &[
+        #[cfg(target_os = "linux")]
+        (
+            AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            AVPixelFormat::AV_PIX_FMT_VAAPI,
+            "VAAPI",
+        ),
+        #[cfg(target_os = "linux")]
+        (
+            AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            AVPixelFormat::AV_PIX_FMT_CUDA,
+            "NVDEC/CUDA",
+        ),
+        #[cfg(target_os = "windows")]
+        (
+            AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            AVPixelFormat::AV_PIX_FMT_D3D11,
+            "D3D11VA",
+        ),
+        #[cfg(target_os = "windows")]
+        (
+            AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+            AVPixelFormat::AV_PIX_FMT_DXVA2_VLD,
+            "DXVA2",
+        ),
+        #[cfg(target_os = "macos")]
+        (
+            AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX,
+            "VideoToolbox",
+        ),
+    ];
+
+    for (dev_type, pix_fmt, name) in candidates {
+        let mut ctx: *mut AVBufferRef = std::ptr::null_mut();
+        let ret = av_hwdevice_ctx_create(
+            &mut ctx,
+            *dev_type,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if ret == 0 && !ctx.is_null() {
+            log_event(
+                "SUCCESS",
+                "DECODER",
+                "init",
+                &format!("Hardware decode device created: {}", name),
+            );
+            return Some((ctx, *pix_fmt as i32));
+        }
+    }
+    None
+}
 
 pub struct H265Decoder {
     decoder: decoder::Video,
-    scaler: Option<Context>,
+    scaler: Option<ScaleContext>,
+    scaler_in_format: Pixel,
     bgra_frame: Option<ffmpeg::util::frame::Video>,
+    hw_device: Option<*mut ffmpeg::ffi::AVBufferRef>,
+    using_hw: bool,
+}
+
+// The raw hw_device pointer is only touched from the decoder thread.
+unsafe impl Send for H265Decoder {}
+
+impl Drop for H265Decoder {
+    fn drop(&mut self) {
+        if let Some(mut dev) = self.hw_device.take() {
+            unsafe { ffmpeg::ffi::av_buffer_unref(&mut dev) };
+        }
+    }
 }
 
 impl H265Decoder {
-    pub fn new() -> Result<Self, ffmpeg::Error> {
+    pub fn new(try_hw: bool) -> Result<Self, ffmpeg::Error> {
         ffmpeg::init()?;
 
-        // Attempt to find a hardware-accelerated decoder first, fallback to software
-        let codec = ffmpeg::decoder::find_by_name("hevc_videotoolbox")
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_cuvid"))
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_qsv"))
-            .or_else(|| ffmpeg::decoder::find_by_name("hevc_vaapi"))
-            .or_else(|| ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC))
-            .ok_or(ffmpeg::Error::DecoderNotFound)?;
-
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            &format!("Selected HEVC decoder: {}", codec.name()),
-        );
+        let codec =
+            ffmpeg::decoder::find(ffmpeg::codec::Id::HEVC).ok_or(ffmpeg::Error::DecoderNotFound)?;
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
 
-        // Platform specific HW acceleration hints
-        #[cfg(target_os = "windows")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting Windows DXVA2/D3D11VA acceleration",
-        );
+        // Multithreaded software decode as the baseline. Frame threading adds
+        // a small pipeline delay but is the only way software HEVC keeps up
+        // with high-fps content; 4 threads bounds that delay.
+        context.set_threading(ffmpeg::codec::threading::Config {
+            kind: ffmpeg::codec::threading::Type::Frame,
+            count: 4,
+        });
 
-        #[cfg(target_os = "macos")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting macOS VideoToolbox acceleration",
-        );
+        let mut hw_device = None;
+        let mut using_hw = false;
 
-        #[cfg(target_os = "linux")]
-        log_event(
-            "INFO",
-            "DECODER",
-            "init",
-            "Targeting Linux NVDEC/VAAPI acceleration",
-        );
+        if try_hw {
+            unsafe {
+                if let Some((dev, pix_fmt)) = create_hw_device() {
+                    TARGET_HW_FMT.store(pix_fmt, Ordering::Relaxed);
+                    let raw = context.as_mut_ptr();
+                    (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(dev);
+                    (*raw).get_format = Some(get_hw_format);
+                    hw_device = Some(dev);
+                    using_hw = true;
+                }
+            }
+        }
+
+        if !using_hw {
+            TARGET_HW_FMT.store(-1, Ordering::Relaxed);
+            log_event(
+                "INFO",
+                "DECODER",
+                "init",
+                "No hardware decode device — using multithreaded software HEVC",
+            );
+        }
 
         let decoder = context.decoder().video()?;
 
         Ok(H265Decoder {
             decoder,
             scaler: None,
+            scaler_in_format: Pixel::None,
             bgra_frame: None,
+            hw_device,
+            using_hw,
         })
     }
 
-    pub fn decode_and_push(&mut self, data: &[u8], timestamp: u64) -> Result<(), ffmpeg::Error> {
+    pub fn is_hw(&self) -> bool {
+        self.using_hw
+    }
+
+    /// Drop any buffered reference frames. Called when decoding resumes after
+    /// a gap, so stale references do not smear over the first frames.
+    pub fn flush(&mut self) {
+        self.decoder.flush();
+    }
+
+    fn is_hw_frame(frame: &ffmpeg::util::frame::Video) -> bool {
+        let av_fmt: ffmpeg::ffi::AVPixelFormat = frame.format().into();
+        unsafe {
+            let desc = ffmpeg::ffi::av_pix_fmt_desc_get(av_fmt);
+            if desc.is_null() {
+                return false;
+            }
+            ((*desc).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL as u64) != 0
+        }
+    }
+
+    pub fn decode_and_push(
+        &mut self,
+        data: &[u8],
+        timestamp: u64,
+        decode_started: std::time::Instant,
+    ) -> Result<(), ffmpeg::Error> {
         let mut packet = packet::Packet::new(data.len());
         if let Some(pdata) = packet.data_mut() {
             pdata.copy_from_slice(data);
         }
         packet.set_pts(Some(timestamp as i64));
 
-        if let Err(e) = self.decoder.send_packet(&packet) {
-            log_event(
-                "ERROR",
-                "DECODER",
-                "pipeline",
-                &format!("Packet send failed: {:?}", e),
-            );
-            return Err(e);
-        }
+        self.decoder.send_packet(&packet)?;
 
         let mut frame = ffmpeg::util::frame::Video::empty();
-        while self.decoder.receive_frame(&mut frame).is_ok() {
-            let width = frame.width();
-            let height = frame.height();
-            let format = frame.format();
+        let mut sw_frame = ffmpeg::util::frame::Video::empty();
 
-            if self.scaler.is_none()
+        while self.decoder.receive_frame(&mut frame).is_ok() {
+            // Hardware frames live in GPU memory — download to system memory
+            // (typically NV12) before color conversion.
+            let src: &ffmpeg::util::frame::Video = if Self::is_hw_frame(&frame) {
+                unsafe {
+                    let ret = ffmpeg::ffi::av_hwframe_transfer_data(
+                        sw_frame.as_mut_ptr(),
+                        frame.as_ptr(),
+                        0,
+                    );
+                    if ret < 0 {
+                        return Err(ffmpeg::Error::from(ret));
+                    }
+                    let _ = ffmpeg::ffi::av_frame_copy_props(sw_frame.as_mut_ptr(), frame.as_ptr());
+                }
+                &sw_frame
+            } else {
+                &frame
+            };
+
+            let width = src.width();
+            let height = src.height();
+            let format = src.format();
+
+            let needs_new_scaler = self.scaler.is_none()
+                || self.scaler_in_format != format
                 || self
                     .bgra_frame
                     .as_ref()
-                    .map_or(true, |f| f.width() != width || f.height() != height)
-            {
-                let mut scaler = Context::get(
+                    .map_or(true, |f| f.width() != width || f.height() != height);
+
+            if needs_new_scaler {
+                let scaler = ScaleContext::get(
                     format,
                     width,
                     height,
                     Pixel::BGRA,
                     width,
                     height,
-                    flag::Flags::BILINEAR | flag::Flags::SWS_ACCEL,
-                )
-                .unwrap();
-
-                // Explicitly set Rec.709 colorspace for accurate HD colors
-                // (Using ffmpeg-next context methods if possible, otherwise rely on the scaler's defaults)
-                // Note: ffmpeg-next SwScale Context doesn't always expose colorspace directly in v7.1
-                // but we can ensure it through the input frame's properties if the decoder supports it.
+                    flag::Flags::BILINEAR,
+                )?;
                 self.scaler = Some(scaler);
+                self.scaler_in_format = format;
                 self.bgra_frame = Some(ffmpeg::util::frame::Video::new(Pixel::BGRA, width, height));
             }
 
             if let (Some(scaler), Some(bgra_frame)) =
                 (self.scaler.as_mut(), self.bgra_frame.as_mut())
             {
-                if scaler.run(&frame, bgra_frame).is_ok() {
-                    let frame_ts = frame.pts().unwrap_or(timestamp as i64) as u64;
+                if scaler.run(src, bgra_frame).is_ok() {
                     let width_u32 = bgra_frame.width();
                     let height_u32 = bgra_frame.height();
                     let width = width_u32 as usize;
@@ -134,11 +266,8 @@ impl H265Decoder {
                     let stride = bgra_frame.stride(0);
                     let data = bgra_frame.data(0);
 
-                    // Acquire buffer from pool for preview
-                    let mut buffer = crate::renderer::FREE_QUEUE
-                        .pop()
-                        .unwrap_or_else(|_| Vec::with_capacity(width * height * 4));
-                    buffer.clear();
+                    // Acquire buffer from pool
+                    let mut buffer = crate::framepool::acquire(width * height * 4);
 
                     // Copy row by row to ensure it's tightly packed
                     if stride == width * 4 {
@@ -151,30 +280,8 @@ impl H265Decoder {
                         }
                     }
 
-                    // Mirror Pro Optimization: Use SIMD for UYVY if format is detected (Example)
-                    if format == Pixel::UYVY422 {
-                        // We could use our new SIMD convert here
-                        // crate::video_processing::compress_uyvy_to_nv12(...);
-                    }
-
-                    // Write to OBS (use standardized header format: magic wide height timestamp datasize)
-                    unsafe {
-                        crate::write_frame_to_obs(
-                            buffer.as_ptr(),
-                            buffer.len(),
-                            width_u32,
-                            height_u32,
-                            frame_ts,
-                            0,
-                        );
-                    }
-
-                    // Push to Preview Window
-                    crate::renderer::update_preview_window(buffer, width, height, 0);
-
-                    if frame_ts % 100 == 0 {
-                        println!("[Decoder] Processed frame: {}x{}", width, height);
-                    }
+                    // Single delivery point for decoded frames.
+                    crate::deliver_frame(buffer, width_u32, height_u32, decode_started);
                 }
             }
         }
@@ -183,10 +290,11 @@ impl H265Decoder {
     }
 }
 
-pub fn start_decoder_thread(queue: Arc<ConcurrentQueue<Vec<u8>>>) {
+pub fn start_decoder_thread(queue: Arc<VideoQueue>, my_gen: u64) {
     std::thread::spawn(move || {
         log_event("INFO", "SYSTEM", "decoder", "FFmpeg Decoder Thread Started");
-        let mut decoder = match H265Decoder::new() {
+
+        let mut decoder = match H265Decoder::new(true) {
             Ok(d) => d,
             Err(e) => {
                 log_event(
@@ -199,72 +307,77 @@ pub fn start_decoder_thread(queue: Arc<ConcurrentQueue<Vec<u8>>>) {
             }
         };
 
+        let mut consecutive_errors: u32 = 0;
+        let mut was_idle = true;
+        let mut seen_epoch = crate::stream_epoch();
+
         loop {
-            if crate::TERMINATION_SIGNAL.load(Ordering::Relaxed) {
-                log_event("INFO", "SYSTEM", "decoder", "Decoder thread receiving termination signal.");
+            if !crate::session_alive(my_gen) {
+                log_event(
+                    "INFO",
+                    "SYSTEM",
+                    "decoder",
+                    "Decoder thread received termination signal.",
+                );
                 break;
             }
 
-            let mut current_packet = None;
+            // Blocks until a packet arrives — no sleep-poll latency.
+            let Some(packet_data) = queue.pop_timeout(Duration::from_millis(100)) else {
+                continue;
+            };
 
-            // Jitter Buffer: Drop old packets to reduce latency if backlog builds up.
-            // With bounded(20), we allow some breathing room but clear if we hit 15.
-            let queue_len = queue.len();
-            if queue_len > 15 {
-                let mut dropped = 0;
-                // Jitter Buffer: Drop old packets to reduce latency.
-                // We try to find the next Keyframe (I-frame) to avoid smearing.
-                // HEVC NAL units start with 00 00 01 or 00 00 00 01.
-                // The NAL unit type for HEVC IDR is usually 19 or 20.
-                while queue.len() > 5 {
-                    if let Ok(pkt) = queue.pop() {
-                        dropped += 1;
-                        // Check if this packet is a keyframe. 
-                        // In our framed protocol, the 9-byte transport header is stripped,
-                        // so the packet starts with the raw HEVC bitstream (Annex B).
-                        // For Annex B, the NAL header starts at index 4 (after 00 00 00 01).
-                        if pkt.len() > 6 {
-                            let nal_type = (pkt[4] >> 1) & 0x3F;
-                            if nal_type == 19 || nal_type == 20 {
-                                // Found a keyframe! Stop dropping and keep this one.
-                                dropped -= 1; // Do not count the keyframe as dropped
-                                current_packet = Some(pkt);
-                                break;
-                            }
+            // Decoding only exists to serve the OBS shared-memory feed and to
+            // report the frame size to the player. With neither wanting a
+            // decoded frame, drop the packet instead of burning a core —
+            // ffplay decodes its own copy from the passthrough stream.
+            if !crate::needs_decoded_frames() {
+                was_idle = true;
+                continue;
+            }
+            // A reconnect starts a fresh bitstream; decoding it against the
+            // previous session's reference frames smears until the next IRAP.
+            let epoch = crate::stream_epoch();
+            if epoch != seen_epoch {
+                seen_epoch = epoch;
+                was_idle = true;
+            }
+            if was_idle {
+                // Resuming mid-GOP: references are stale until the next IRAP.
+                decoder.flush();
+                was_idle = false;
+            }
+
+            let decode_started = std::time::Instant::now();
+            let timestamp = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+            match decoder.decode_and_push(&packet_data, timestamp, decode_started) {
+                Ok(_) => consecutive_errors = 0,
+                Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors <= 3 {
+                        log_event(
+                            "ERROR",
+                            "DECODER",
+                            "pipeline",
+                            &format!("Decode failed: {:?}", e),
+                        );
+                    }
+                    // A hardware session that persistently fails (unsupported
+                    // profile, driver quirk) gets rebuilt in software once.
+                    if consecutive_errors == 60 && decoder.is_hw() {
+                        log_event(
+                            "WARN",
+                            "DECODER",
+                            "pipeline",
+                            "Hardware decode failing persistently — rebuilding in software mode",
+                        );
+                        if let Ok(sw) = H265Decoder::new(false) {
+                            decoder = sw;
+                            consecutive_errors = 0;
                         }
-                    } else {
-                        break;
                     }
                 }
-                
-                TOTAL_DROPPED_FRAMES.fetch_add(dropped, Ordering::Relaxed);
-                MINUTE_DROPPED_FRAMES.fetch_add(dropped, Ordering::Relaxed);
-                if dropped > 0 {
-                    log_event(
-                        "WARN",
-                        "DECODER",
-                        "jitter",
-                        &format!("Dropped {} packets (GOP-aware) to reduce latency", dropped),
-                    );
-                }
-            }
-
-            let packet_to_decode = current_packet.or_else(|| queue.pop().ok());
-
-            if let Some(packet_data) = packet_to_decode {
-                let timestamp = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-                if let Err(_) = decoder.decode_and_push(&packet_data, timestamp) {
-                    // Errors are logged inside decode_and_push
-                }
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
-    });
-
-    // Thread to reset per-minute dropped frames
-    std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        MINUTE_DROPPED_FRAMES.store(0, Ordering::Relaxed);
     });
 }

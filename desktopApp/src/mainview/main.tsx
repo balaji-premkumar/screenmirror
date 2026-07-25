@@ -13,7 +13,8 @@ const rpc = Electroview.defineRPC({
     }
 });
 
-const electroview = new Electroview({ rpc });
+// Constructing the view installs the RPC transport as a side effect.
+new Electroview({ rpc });
 
 // Export rpc so App can use it for polling
 (window as any).__mirrorRpc = rpc;

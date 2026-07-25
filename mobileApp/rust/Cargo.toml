@@ -22,4 +22,3 @@ chrono = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = "0.8"
 ndk-sys = "0.5"
-oboe = { version = "0.6", features = ["shared-stdcxx"] }

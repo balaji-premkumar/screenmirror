@@ -8,7 +8,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rusb = "0.9"
-ffmpeg-next = { version = "7.1", features = ["software-scaling", "format"] }
+# Only the decode + colour-conversion paths are used, so the default feature
+# set is disabled: it would additionally pull in avfilter/avdevice and force
+# libavfilter-dev/libavdevice-dev onto every build machine for no benefit.
+ffmpeg-next = { version = "8.1", default-features = false, features = [
+    "codec",
+    "format",
+    "software-scaling",
+] }
 concurrent-queue = "2.5"
 shared_memory = "0.12"
 anyhow = "1.0"
@@ -18,7 +25,12 @@ chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 byteorder = "1.5"
-sdl2 = { version = "0.38.0", features = ["bundled"] }
-cpal = "0.17.3"
-ringbuf = "0.4.8"
-rubato = "0.11"
+bytes = "1"
+memchr = "2"
+
+# No SDL2 and no cpal.
+#
+# Playback (window *and* sound) is delegated to a child ffplay process fed by
+# the Matroska remuxer in player.rs, so the backend neither creates a window
+# nor opens an audio device. That removes libsdl2-dev and libasound2-dev from
+# the build requirements, and with them the SDL-on-macOS main-thread problem.

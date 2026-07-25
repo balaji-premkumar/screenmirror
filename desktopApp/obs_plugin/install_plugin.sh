@@ -44,15 +44,23 @@ else
 fi
 
 echo ""
-echo "→ Checking for pre-compiled plugin..."
+echo "→ Building plugin..."
+
+if command -v cmake &> /dev/null; then
+    cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$BUILD_DIR" --config Release
+else
+    echo "→ cmake not found, falling back to a direct gcc build"
+    mkdir -p "$BUILD_DIR"
+    gcc -shared -fPIC -O2 -o "$OUTPUT" "$SOURCE" -I/usr/include/obs -lobs -lrt -lpthread
+fi
 
 if [ ! -f "$OUTPUT" ]; then
-    echo "✗ Pre-compiled plugin not found at $OUTPUT."
-    echo "  Please compile or copy mirror-source.so to build/ first."
+    echo "✗ Build did not produce $OUTPUT"
     exit 1
 fi
 
-echo "✓ Found: $OUTPUT"
+echo "✓ Built: $OUTPUT"
 
 # ── 4. Find OBS plugin directory ──────────────────────────
 PLUGIN_DIR=""
@@ -80,10 +88,15 @@ else
 fi
 
 # ── 5. Install ─────────────────────────────────────────────
-INSTALL_DIR="$PLUGIN_DIR/mirror-source/bin/64bit"
+BASE_DIR="$PLUGIN_DIR/mirror-source"
+INSTALL_DIR="$BASE_DIR/bin/64bit"
 mkdir -p "$INSTALL_DIR"
 
 cp "$OUTPUT" "$INSTALL_DIR/mirror-source.so"
+
+# Must match PLUGIN_VERSION in mirror_backend/src/obs_feed.rs — the desktop app
+# reads this file to decide whether the installed plugin is current.
+echo -n "2.0.0" > "$BASE_DIR/version.txt"
 
 echo ""
 echo "════════════════════════════════════════════════"

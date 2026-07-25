@@ -1,29 +1,30 @@
+//! OBS Feed Module
+//!
+//! Video frames reach OBS through the triple-buffer segment owned by
+//! `shared_mem::TripleBufferManager` (os id `obs_mirror_buffer`) — the OBS
+//! plugin (`obs_plugin/mirror_source.c`) maps that segment directly.
+//!
+//! This module owns the *audio* ring shared with the plugin and the
+//! OBS detection / plugin installation helpers.
+//!
+//! Audio SHM layout (32-byte header, must match `struct audio_shm_header`
+//! in obs_plugin/mirror_source.c):
+//!   offset 0   magic "MIRA"
+//!   offset 4   _pad0    u32
+//!   offset 8   written  u64  total samples ever written (atomic, monotonic)
+//!   offset 16  session  u64  changes on every app start
+//!   offset 24  _pad1    u64
+//!   offset 32  float samples[96000]  (mono f32 @ 48 kHz ≈ 2 s)
+//!
+//! `written` is a running total rather than a ring index on purpose: a reader
+//! that falls more than one buffer behind can compare it against its own
+//! consumed count and *know* it was lapped. With a bare write index that
+//! situation is indistinguishable from normal progress, so the reader would
+//! silently emit garbage.
+
 use crate::receiver::log_event;
 use once_cell::sync::Lazy;
-/// OBS Feed Module
-///
-/// Manages a raw POSIX shared memory segment (`/mirror_obs_feed`) that an OBS
-/// Studio source plugin can map and read decoded video frames from.
-///
-/// SHM layout (64-byte header, cache-line aligned, then pixel data):
-///
-///   Offset  Size  Field
-///   ------  ----  -----
-///     0      4    magic  "MIRR"
-///     4      4    seq    seqlock counter (odd = write in progress, even = ready)
-///     8      4    width
-///    12      4    height
-///    16      4    format  0=BGRA 1=NV12 2=I420
-///    20      4    _pad
-///    24      8    timestamp
-///    32      8    frame_count  monotonically increasing
-///    40     24    _pad2
-///    64      *    pixel data (up to MAX_PIXEL_DATA bytes)
-///
-/// Synchronisation protocol (seqlock):
-///   Writer: store seq|1 (odd)  →  write all data  →  fence(Release)  →  store seq+2 (even)
-///   Reader: load seq1; if odd skip; copy data; fence(Acquire); load seq2; if seq1≠seq2 discard
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // ── Toggle ──────────────────────────────────────────────────
@@ -46,229 +47,206 @@ pub fn is_enabled() -> bool {
     OBS_ENABLED.load(Ordering::Relaxed)
 }
 
-// ── Shared memory handle ────────────────────────────────────
-struct ObsShmem {
+// ── Audio shared memory ─────────────────────────────────────
+
+pub const AUDIO_BUFFER_SAMPLES: usize = 96000;
+const AUDIO_HEADER_SIZE: usize = 32;
+const AUDIO_SHM_SIZE: usize = AUDIO_HEADER_SIZE + AUDIO_BUFFER_SAMPLES * 4;
+const AUDIO_OFF_WRITTEN: usize = 8;
+const AUDIO_OFF_SESSION: usize = 16;
+
+struct AudioShmem {
     ptr: *mut u8,
-    size: usize,
+    #[cfg(unix)]
     fd: i32,
+    #[cfg(target_os = "windows")]
+    handle: win::HANDLE,
 }
 
-unsafe impl Send for ObsShmem {}
-unsafe impl Sync for ObsShmem {}
+unsafe impl Send for AudioShmem {}
 
-static OBS_SHMEM: Lazy<Mutex<Option<ObsShmem>>> = Lazy::new(|| Mutex::new(None));
-static AUDIO_SHMEM: Lazy<Mutex<Option<ObsShmem>>> = Lazy::new(|| Mutex::new(None));
+static AUDIO_SHMEM: Lazy<Mutex<Option<AudioShmem>>> = Lazy::new(|| Mutex::new(None));
 
-/// Monotonically increasing frame counter written into every SHM header.
-static FRAME_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Byte offset from the start of the SHM segment to the first pixel byte.
-/// The header occupies a full 64-byte cache line.
-const SHM_PIXEL_OFFSET: usize = 64;
-
-/// Byte offsets of header fields (must match `struct shm_header` in mirror_source.c)
-const OFF_MAGIC:       usize = 0;
-const OFF_SEQ:         usize = 4;
-const OFF_WIDTH:       usize = 8;
-const OFF_HEIGHT:      usize = 12;
-const OFF_FORMAT:      usize = 16;
-const OFF_TIMESTAMP:   usize = 24;
-const OFF_FRAME_COUNT: usize = 32;
-
-#[cfg(target_os = "linux")]
-const SHM_NAME: &[u8] = b"/mirror_obs_feed\0";
-
-#[cfg(target_os = "linux")]
+// POSIX shared memory works the same on macOS as on Linux, and the OBS plugin
+// already takes the POSIX branch there — only this side was gated, which left
+// macOS with video but silently no audio.
+#[cfg(unix)]
 const AUDIO_SHM_NAME: &[u8] = b"/mirror_obs_audio\0";
 
-#[repr(C)]
-struct AudioShmHeader {
-    magic: [u8; 4],
-    head: u32,
-    // float data[96000] follows
+#[cfg(target_os = "windows")]
+mod win {
+    pub type HANDLE = *mut core::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn CreateFileMappingA(
+            h_file: HANDLE,
+            attrs: *mut core::ffi::c_void,
+            protect: u32,
+            size_high: u32,
+            size_low: u32,
+            name: *const u8,
+        ) -> HANDLE;
+        pub fn MapViewOfFile(
+            h: HANDLE,
+            access: u32,
+            off_high: u32,
+            off_low: u32,
+            size: usize,
+        ) -> *mut core::ffi::c_void;
+        pub fn UnmapViewOfFile(addr: *const core::ffi::c_void) -> i32;
+        pub fn CloseHandle(h: HANDLE) -> i32;
+    }
+
+    pub const PAGE_READWRITE: u32 = 0x04;
+    pub const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
+    pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    /// Mapping name — the OBS plugin opens the same name with OpenFileMappingA.
+    pub const AUDIO_MAP_NAME: &[u8] = b"mirror_obs_audio\0";
 }
 
-const AUDIO_BUFFER_SAMPLES: usize = 96000;
-const AUDIO_SHM_SIZE: usize = std::mem::size_of::<AudioShmHeader>() + (AUDIO_BUFFER_SAMPLES * 4);
-
-// Max frame size we'll ever need to handle (4K UHD)
-const MAX_FRAME_WIDTH: usize = 3840;
-const MAX_FRAME_HEIGHT: usize = 2160;
-const MAX_PIXEL_DATA: usize = MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT * 4;
-
-/// Initialise the OBS shared memory segment.
-/// Called once from `init_mirror()`.
-pub fn init(width: u32, height: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // Allocate one full 64-byte header + enough pixel room for any frame up to 4K.
-        let total = SHM_PIXEL_OFFSET + MAX_PIXEL_DATA;
-
-        unsafe {
-            // Video SHM
-            libc::shm_unlink(SHM_NAME.as_ptr() as *const libc::c_char);
-            let fd = libc::shm_open(SHM_NAME.as_ptr() as *const libc::c_char, libc::O_CREAT | libc::O_RDWR, 0o666);
-            if fd >= 0 {
-                libc::ftruncate(fd, total as libc::off_t);
-                let ptr = libc::mmap(std::ptr::null_mut(), total, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
-                if ptr != libc::MAP_FAILED {
-                    // Zero the entire segment (sets seq=0, magic=0x00000000)
-                    std::ptr::write_bytes(ptr as *mut u8, 0, total);
-                    // Do NOT write magic yet — it is written as part of the first
-                    // seqlock-protected write so the reader can't see partial headers.
-                    if let Ok(mut shmem) = OBS_SHMEM.lock() {
-                        *shmem = Some(ObsShmem { ptr: ptr as *mut u8, size: total, fd });
-                    }
-                }
-            }
-
-            // Audio SHM
-            libc::shm_unlink(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char);
-            let afd = libc::shm_open(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char, libc::O_CREAT | libc::O_RDWR, 0o666);
-            if afd >= 0 {
-                libc::ftruncate(afd, AUDIO_SHM_SIZE as libc::off_t);
-                let aptr = libc::mmap(std::ptr::null_mut(), AUDIO_SHM_SIZE, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, afd, 0);
-                if aptr != libc::MAP_FAILED {
-                    std::ptr::write_bytes(aptr as *mut u8, 0, AUDIO_SHM_SIZE);
-                    let hdr = aptr as *mut AudioShmHeader;
-                    (*hdr).magic = *b"MIRA";
-                    (*hdr).head = 0;
-                    if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
-                        *shmem = Some(ObsShmem { ptr: aptr as *mut u8, size: AUDIO_SHM_SIZE, fd: afd });
-                    }
-                }
-            }
-        }
-
-        log_event(
-            "SUCCESS",
-            "OBS",
-            "shmem",
-            &format!("OBS feed shared memory initialised: {}x{}", width, height),
+/// Create the audio SHM ring. Called once from `init_mirror()`.
+pub fn init_audio() -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::shm_unlink(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char);
+        let fd = libc::shm_open(
+            AUDIO_SHM_NAME.as_ptr() as *const libc::c_char,
+            libc::O_CREAT | libc::O_RDWR,
+            0o600,
         );
+        if fd < 0 {
+            log_event("ERROR", "OBS", "shmem", "shm_open for audio feed failed");
+            return false;
+        }
+        // The OBS process runs as the same user; 0600 keeps other local
+        // users from reading the mirrored audio.
+        libc::ftruncate(fd, AUDIO_SHM_SIZE as libc::off_t);
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            AUDIO_SHM_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            libc::close(fd);
+            return false;
+        }
+        let base = ptr as *mut u8;
+        std::ptr::write_bytes(base, 0, AUDIO_SHM_SIZE);
+        std::ptr::copy_nonoverlapping(b"MIRA".as_ptr(), base, 4);
+        // Published last: a reader that sees the magic must also see a session
+        // id it can compare against.
+        *(base.add(AUDIO_OFF_SESSION) as *mut u64) = audio_session_id();
+        if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
+            *shmem = Some(AudioShmem { ptr: base, fd });
+        }
+        log_event("SUCCESS", "OBS", "shmem", "OBS audio shared memory initialised");
         true
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let handle = win::CreateFileMappingA(
+            win::INVALID_HANDLE_VALUE,
+            std::ptr::null_mut(),
+            win::PAGE_READWRITE,
+            0,
+            AUDIO_SHM_SIZE as u32,
+            win::AUDIO_MAP_NAME.as_ptr(),
+        );
+        if handle.is_null() {
+            log_event("ERROR", "OBS", "shmem", "CreateFileMapping for audio feed failed");
+            return false;
+        }
+        let ptr = win::MapViewOfFile(handle, win::FILE_MAP_ALL_ACCESS, 0, 0, AUDIO_SHM_SIZE);
+        if ptr.is_null() {
+            win::CloseHandle(handle);
+            return false;
+        }
+        let base = ptr as *mut u8;
+        std::ptr::write_bytes(base, 0, AUDIO_SHM_SIZE);
+        std::ptr::copy_nonoverlapping(b"MIRA".as_ptr(), base, 4);
+        *(base.add(AUDIO_OFF_SESSION) as *mut u64) = audio_session_id();
+        if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
+            *shmem = Some(AudioShmem { ptr: base, handle });
+        }
+        log_event("SUCCESS", "OBS", "shmem", "OBS audio shared memory initialised");
+        true
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
-        log_event("WARN", "OBS", "shmem", "OBS shared memory feed only supported on Linux");
+        log_event(
+            "WARN",
+            "OBS",
+            "shmem",
+            "OBS shared memory feed not supported on this platform",
+        );
         false
     }
 }
 
+fn audio_session_id() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1
+}
+
 pub fn write_audio(samples: &[f32]) {
-    if !is_enabled() {
+    if !is_enabled() || samples.is_empty() {
         return;
     }
 
     if let Ok(shmem_opt) = AUDIO_SHMEM.lock() {
         if let Some(ref shm) = *shmem_opt {
             unsafe {
-                let hdr = shm.ptr as *mut AudioShmHeader;
-                let data_ptr = (shm.ptr.add(std::mem::size_of::<AudioShmHeader>())) as *mut f32;
-                
-                let mut head = (*hdr).head as usize;
-                
+                let written_atomic = &*(shm.ptr.add(AUDIO_OFF_WRITTEN) as *const AtomicU64);
+                let data_ptr = shm.ptr.add(AUDIO_HEADER_SIZE) as *mut f32;
+
+                // Only this thread writes, so a relaxed load of our own
+                // counter is enough to find the cursor.
+                let written = written_atomic.load(Ordering::Relaxed);
+                let mut head = (written % AUDIO_BUFFER_SAMPLES as u64) as usize;
                 for &sample in samples {
                     *data_ptr.add(head) = sample;
-                    head = (head + 1) % AUDIO_BUFFER_SAMPLES;
+                    head += 1;
+                    if head == AUDIO_BUFFER_SAMPLES {
+                        head = 0;
+                    }
                 }
-                
-                // Full CPU memory barrier — compiler_fence is NOT sufficient on ARM.
+
+                // Samples must be visible before the count that advertises them.
                 fence(Ordering::Release);
-                (*hdr).head = head as u32;
+                written_atomic.store(written + samples.len() as u64, Ordering::Release);
             }
         }
     }
 }
 
-/// Write a decoded frame to the OBS shared memory segment using a seqlock.
-///
-/// Protocol:
-///   1. Read current `seq` (must be even — previous write complete).
-///   2. Store `seq | 1` (odd)  → signals reader: write in progress.
-///   3. fence(Release) — all subsequent writes visible after the seq store.
-///   4. Write pixel data + header fields.
-///   5. fence(Release) — all writes above committed before step 6.
-///   6. Store `seq + 2` (even) → signals reader: frame ready.
-///
-/// The reader checks seq before and after copying; if they differ (or if odd)
-/// the frame is discarded without tearing being shown.
-pub fn write_frame(data: *const u8, len: usize, width: u32, height: u32, format: u32, timestamp: u64) {
-    if !is_enabled() {
-        return;
-    }
-
-    if let Ok(shmem) = OBS_SHMEM.lock() {
-        if let Some(ref shm) = *shmem {
-            let pixel_data_needed = (width as usize) * (height as usize) * 4;
-
-            // Safety: only write if the frame fits in our pre-allocated SHM
-            if SHM_PIXEL_OFFSET + pixel_data_needed > shm.size {
-                return;
-            }
-
-            let frame_count = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-            unsafe {
-                // ── Seqlock: begin write ──────────────────────────────────
-                // The seq field lives at byte offset OFF_SEQ (4) in the SHM.
-                // We cast it to AtomicU32 — safe because SHM is page-aligned
-                // (≥4096 bytes), so offset 4 is always 4-byte aligned.
-                let seq_ptr = &*(shm.ptr.add(OFF_SEQ) as *const std::sync::atomic::AtomicU32);
-
-                // Load current generation (expected to be even)
-                let seq = seq_ptr.load(Ordering::Relaxed);
-
-                // Mark write in-progress (odd value)
-                seq_ptr.store(seq.wrapping_add(1), Ordering::Release);
-
-                // Full CPU barrier: no subsequent write can be reordered before this point
-                fence(Ordering::Release);
-
-                // ── Write pixel data (the large copy) ────────────────────
-                let pixels_ptr = shm.ptr.add(SHM_PIXEL_OFFSET);
-                let copy_len = len.min(pixel_data_needed);
-                std::ptr::copy_nonoverlapping(data, pixels_ptr, copy_len);
-
-                // ── Write header metadata fields ─────────────────────────
-                // magic at OFF_MAGIC (0)
-                std::ptr::copy_nonoverlapping(b"MIRR".as_ptr(), shm.ptr.add(OFF_MAGIC), 4);
-                // width at OFF_WIDTH (8)
-                std::ptr::write(shm.ptr.add(OFF_WIDTH)  as *mut u32, width);
-                // height at OFF_HEIGHT (12)
-                std::ptr::write(shm.ptr.add(OFF_HEIGHT) as *mut u32, height);
-                // format at OFF_FORMAT (16)
-                std::ptr::write(shm.ptr.add(OFF_FORMAT) as *mut u32, format);
-                // timestamp at OFF_TIMESTAMP (24)
-                std::ptr::write(shm.ptr.add(OFF_TIMESTAMP)   as *mut u64, timestamp);
-                // frame_count at OFF_FRAME_COUNT (32)
-                std::ptr::write(shm.ptr.add(OFF_FRAME_COUNT) as *mut u64, frame_count);
-
-                // ── Seqlock: finish write ─────────────────────────────────
-                // Barrier ensures ALL writes above are visible before seq becomes even.
-                fence(Ordering::Release);
-
-                // Mark write complete (next even generation)
-                seq_ptr.store(seq.wrapping_add(2), Ordering::Release);
-            }
-        }
-    }
-}
-
-/// Clean up the shared memory segment on shutdown.
+/// Release the audio segment on shutdown.
 pub fn cleanup() {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(mut shmem) = OBS_SHMEM.lock() {
-            if let Some(shm) = shmem.take() {
-                unsafe {
-                    libc::munmap(shm.ptr as *mut libc::c_void, shm.size);
-                    libc::close(shm.fd);
-                    libc::shm_unlink(SHM_NAME.as_ptr() as *const libc::c_char);
-                }
-                log_event("INFO", "OBS", "shmem", "OBS feed shared memory released");
+    if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
+        if let Some(shm) = shmem.take() {
+            #[cfg(unix)]
+            unsafe {
+                libc::munmap(shm.ptr as *mut libc::c_void, AUDIO_SHM_SIZE);
+                libc::close(shm.fd);
+                libc::shm_unlink(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char);
             }
+            #[cfg(target_os = "windows")]
+            unsafe {
+                win::UnmapViewOfFile(shm.ptr as *const core::ffi::c_void);
+                win::CloseHandle(shm.handle);
+            }
+            #[cfg(not(any(unix, target_os = "windows")))]
+            let _ = shm;
+            log_event("INFO", "OBS", "shmem", "OBS audio shared memory released");
         }
     }
 }
@@ -280,10 +258,14 @@ pub fn check_obs_installed() -> bool {
     #[cfg(target_os = "linux")]
     {
         // Native package
-        if std::process::Command::new("which").arg("obs")
+        if std::process::Command::new("which")
+            .arg("obs")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false) {
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             return true;
         }
         // Flatpak
@@ -291,7 +273,10 @@ pub fn check_obs_installed() -> bool {
             .args(["info", "com.obsproject.Studio"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false) {
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             return true;
         }
         // Snap
@@ -299,20 +284,102 @@ pub fn check_obs_installed() -> bool {
             .args(["list", "obs-studio"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false) {
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             return true;
         }
         false
     }
     #[cfg(target_os = "windows")]
     {
-        let paths = [
-            r"C:\Program Files\obs-studio",
-            r"C:\Program Files (x86)\obs-studio",
+        let mut paths = vec![
+            r"C:\Program Files\obs-studio".to_string(),
+            r"C:\Program Files (x86)\obs-studio".to_string(),
         ];
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            paths.push(format!(r"{pf}\obs-studio"));
+        }
         paths.iter().any(|p| std::path::Path::new(p).exists())
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    false
+}
+
+/// Is OBS Studio running right now?
+///
+/// Gating the "Direct to OBS" toggle on this keeps the app from offering a
+/// feed nothing is reading. The result is cached: this is polled from the UI
+/// status tick, and spawning a process enumerator twice a second is not free.
+pub fn check_obs_running() -> bool {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+    static CACHE: Lazy<Mutex<Option<(bool, std::time::Instant)>>> = Lazy::new(|| Mutex::new(None));
+
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((value, when)) = *cache {
+        if when.elapsed() < TTL {
+            return value;
+        }
+    }
+    let value = probe_obs_running();
+    *cache = Some((value, std::time::Instant::now()));
+    value
+}
+
+fn probe_obs_running() -> bool {
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "linux")]
+    {
+        // Native package (obs / obs64) and the Flatpak wrapper process.
+        for args in [
+            vec!["-x", "obs"],
+            vec!["-x", "obs64"],
+            vec!["-f", "com.obsproject.Studio"],
+        ] {
+            if Command::new("pgrep")
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for image in ["obs64.exe", "obs32.exe"] {
+            let out = Command::new("tasklist")
+                .args(["/NH", "/FI", &format!("IMAGENAME eq {image}")])
+                .output();
+            if let Ok(out) = out {
+                if String::from_utf8_lossy(&out.stdout)
+                    .to_lowercase()
+                    .contains(&image.to_lowercase())
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("pgrep")
+            .args(["-x", "OBS"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     false
 }
 
@@ -347,22 +414,40 @@ pub fn get_obs_plugin_dir() -> Option<String> {
 
         None
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        // OBS 28+ loads user plugins from %APPDATA%\obs-studio\plugins
+        let appdata = std::env::var("APPDATA").ok()?;
+        let config_dir = format!(r"{appdata}\obs-studio");
+        if std::path::Path::new(&config_dir).exists() || check_obs_installed() {
+            return Some(format!(r"{config_dir}\plugins"));
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     None
 }
 
 /// Bump this whenever the SHM header layout changes — forces old plugin binaries
 /// to be replaced on next app launch.
-const PLUGIN_VERSION: &str = "1.2.0";
+/// 3.0.0 — audio SHM header grew from 8 to 32 bytes and swapped the bare
+/// write index for a monotonic sample count, so a 2.x plugin binary would
+/// misread the ring entirely. The version file forces it to be replaced.
+const PLUGIN_VERSION: &str = "3.0.0";
+
+#[cfg(target_os = "windows")]
+const PLUGIN_BINARY: &str = "mirror-source.dll";
+#[cfg(not(target_os = "windows"))]
+const PLUGIN_BINARY: &str = "mirror-source.so";
 
 /// Check whether our OBS plugin is already installed and up to date.
 pub fn check_plugin_installed() -> bool {
     if let Some(plugin_dir) = get_obs_plugin_dir() {
         let base_path = format!("{}/mirror-source", plugin_dir);
-        let so_path = format!("{}/bin/64bit/mirror-source.so", base_path);
+        let bin_path = format!("{}/bin/64bit/{}", base_path, PLUGIN_BINARY);
         let version_path = format!("{}/version.txt", base_path);
 
-        if !std::path::Path::new(&so_path).exists() {
+        if !std::path::Path::new(&bin_path).exists() {
             return false;
         }
 
@@ -378,10 +463,15 @@ pub fn check_plugin_installed() -> bool {
     }
 }
 
-/// Build and install the OBS plugin.
+/// Build (Linux) or copy (Windows) and install the OBS plugin.
 /// Returns 0 on success, -1 on failure.
 pub fn install_plugin(project_root: &str) -> i32 {
-    log_event("INFO", "OBS", "install", &format!("Starting OBS plugin build & install (v{})...", PLUGIN_VERSION));
+    log_event(
+        "INFO",
+        "OBS",
+        "install",
+        &format!("Starting OBS plugin install (v{})...", PLUGIN_VERSION),
+    );
 
     let plugin_dir = match get_obs_plugin_dir() {
         Some(d) => d,
@@ -393,89 +483,236 @@ pub fn install_plugin(project_root: &str) -> i32 {
 
     let source_dir = format!("{}/obs_plugin", project_root);
     let build_dir = format!("{}/build", source_dir);
-
-    // Create build directory
     let _ = std::fs::create_dir_all(&build_dir);
 
+    // 1. Look for a pre-bundled plugin binary
+    let bundled = format!("{}/bin/{}", project_root, PLUGIN_BINARY);
+    let precompiled_dev = format!("{}/{}", build_dir, PLUGIN_BINARY);
+
+    let mut plugin_src = if std::path::Path::new(&bundled).exists() {
+        Some(bundled)
+    } else if std::path::Path::new(&precompiled_dev).exists() {
+        Some(precompiled_dev.clone())
+    } else {
+        None
+    };
+
+    // 2. Linux only: compile locally when no binary is bundled
     #[cfg(target_os = "linux")]
-    {
-        // 1. Try to find a pre-bundled plugin in the bin/ directory
-        let bundled_so = format!("{}/bin/mirror-source.so", project_root);
-        let precompiled_dev = format!("{}/build/mirror-source.so", source_dir);
-        
-        let plugin_src = if std::path::Path::new(&bundled_so).exists() {
-            Some(bundled_so)
-        } else if std::path::Path::new(&precompiled_dev).exists() {
-            Some(precompiled_dev.clone())
+    if plugin_src.is_none() {
+        log_event(
+            "INFO",
+            "OBS",
+            "install",
+            "Plugin not found in bin/, attempting local compile...",
+        );
+        let status = std::process::Command::new("gcc")
+            .args([
+                "-shared",
+                "-fPIC",
+                "-O2",
+                "-o",
+                &precompiled_dev,
+                &format!("{}/mirror_source.c", source_dir),
+                "-I/usr/include/obs",
+                "-lobs",
+                "-lrt",
+                "-lpthread",
+            ])
+            .status();
+
+        if status.map(|s| s.success()).unwrap_or(false) {
+            plugin_src = Some(precompiled_dev.clone());
         } else {
-            None
-        };
-
-        if plugin_src.is_none() {
-             log_event("INFO", "OBS", "install", "Plugin not found in bin/, attempting local compile...");
-             let status = std::process::Command::new("gcc")
-                .args([
-                    "-shared", "-fPIC", 
-                    "-o", &precompiled_dev,
-                    &format!("{}/mirror_source.c", source_dir),
-                    "-I/usr/include/obs", "-lobs", "-lrt"
-                ])
-                .status();
-                
-             if status.is_err() || !status.unwrap().success() {
-                log_event("ERROR", "OBS", "install", "Failed to compile plugin locally. Is libobs-dev installed?");
-                return -1;
-             }
-        }
-
-        let final_src = plugin_src.unwrap_or(precompiled_dev);
-
-        // Install to OBS plugin directory
-        let base_install_dir = format!("{}/mirror-source", plugin_dir);
-        let bin_install_dir = format!("{}/bin/64bit", base_install_dir);
-        
-        if std::fs::create_dir_all(&bin_install_dir).is_err() {
             log_event(
                 "ERROR",
                 "OBS",
                 "install",
-                "Failed to create plugin install directory",
+                "Failed to compile plugin locally. Is libobs-dev installed?",
             );
             return -1;
         }
+    }
 
-        let dst = format!("{}/mirror-source.so", bin_install_dir);
-        log_event("INFO", "OBS", "install", &format!("Copying plugin from {} to {}", final_src, dst));
-        if let Err(e) = std::fs::copy(&final_src, &dst) {
-            log_event("ERROR", "OBS", "install", &format!("Failed to copy plugin binary: {}", e));
+    let final_src = match plugin_src {
+        Some(p) => p,
+        None => {
+            log_event(
+                "ERROR",
+                "OBS",
+                "install",
+                "No plugin binary found. On Windows, mirror-source.dll must be \
+                 bundled in bin/ (build it with obs_plugin/CMakeLists.txt).",
+            );
             return -1;
         }
+    };
 
-        // Write version file
-        let version_path = format!("{}/version.txt", base_install_dir);
-        if let Err(e) = std::fs::write(&version_path, PLUGIN_VERSION) {
-             log_event("WARN", "OBS", "install", &format!("Failed to write version file to {}: {}", version_path, e));
-        }
+    // Install to the OBS plugin directory
+    let base_install_dir = format!("{}/mirror-source", plugin_dir);
+    let bin_install_dir = format!("{}/bin/64bit", base_install_dir);
 
+    if std::fs::create_dir_all(&bin_install_dir).is_err() {
         log_event(
-            "SUCCESS",
+            "ERROR",
             "OBS",
             "install",
-            &format!("Plugin v{} installed to {}", PLUGIN_VERSION, dst),
+            "Failed to create plugin install directory",
+        );
+        return -1;
+    }
+
+    let dst = format!("{}/{}", bin_install_dir, PLUGIN_BINARY);
+    log_event(
+        "INFO",
+        "OBS",
+        "install",
+        &format!("Copying plugin from {} to {}", final_src, dst),
+    );
+    if let Err(e) = std::fs::copy(&final_src, &dst) {
+        log_event(
+            "ERROR",
+            "OBS",
+            "install",
+            &format!("Failed to copy plugin binary: {}", e),
+        );
+        return -1;
+    }
+
+    // Write version file
+    let version_path = format!("{}/version.txt", base_install_dir);
+    if let Err(e) = std::fs::write(&version_path, PLUGIN_VERSION) {
+        log_event(
+            "WARN",
+            "OBS",
+            "install",
+            &format!("Failed to write version file to {}: {}", version_path, e),
         );
     }
+
+    log_event(
+        "SUCCESS",
+        "OBS",
+        "install",
+        &format!("Plugin v{} installed to {}", PLUGIN_VERSION, dst),
+    );
 
     0
 }
 
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Read the ring exactly the way obs_plugin/mirror_source.c does.
+    /// Returns (samples_delivered, overrun_detected).
+    fn read_like_plugin(consumed: &mut u64, out: &mut Vec<f32>) -> bool {
+        let shm = AUDIO_SHMEM.lock().unwrap();
+        let base = shm.as_ref().unwrap().ptr;
+        unsafe {
+            let written = (&*(base.add(AUDIO_OFF_WRITTEN) as *const AtomicU64))
+                .load(Ordering::Acquire);
+            let data = base.add(AUDIO_HEADER_SIZE) as *const f32;
+
+            let mut avail = written - *consumed;
+            let mut overrun = false;
+            if avail > AUDIO_BUFFER_SAMPLES as u64 {
+                overrun = true;
+                *consumed = written - AUDIO_BUFFER_SAMPLES as u64;
+                avail = AUDIO_BUFFER_SAMPLES as u64;
+            }
+
+            let start = (*consumed % AUDIO_BUFFER_SAMPLES as u64) as usize;
+            let total = avail as usize;
+            let first = total.min(AUDIO_BUFFER_SAMPLES - start);
+            for i in 0..first {
+                out.push(*data.add(start + i));
+            }
+            for i in 0..(total - first) {
+                out.push(*data.add(i));
+            }
+            *consumed += total as u64;
+            overrun
+        }
+    }
+
+    fn written_count() -> u64 {
+        let shm = AUDIO_SHMEM.lock().unwrap();
+        let base = shm.as_ref().unwrap().ptr;
+        unsafe { (&*(base.add(AUDIO_OFF_WRITTEN) as *const AtomicU64)).load(Ordering::Acquire) }
+    }
+
+    #[test]
+    fn ring_round_trips_and_reports_overrun() {
+        assert!(init_audio(), "audio SHM init failed");
+        set_enabled(true);
+
+        // Header magic is what the plugin gates on.
+        {
+            let shm = AUDIO_SHMEM.lock().unwrap();
+            let base = shm.as_ref().unwrap().ptr;
+            let magic = unsafe { std::slice::from_raw_parts(base, 4) };
+            assert_eq!(magic, b"MIRA");
+            let session =
+                unsafe { *(base.add(AUDIO_OFF_SESSION) as *const u64) };
+            assert_ne!(session, 0, "session id must be set");
+        }
+
+        let mut consumed = written_count();
+        let mut got: Vec<f32> = Vec::new();
+
+        // ── Normal flow: everything arrives, in order ──
+        let batch: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+        write_audio(&batch);
+        assert_eq!(written_count(), consumed + 1000);
+        assert!(!read_like_plugin(&mut consumed, &mut got));
+        assert_eq!(got, batch, "samples must survive the ring round trip");
+
+        // ── Wrap: a batch straddling the end of the ring ──
+        got.clear();
+        let big: Vec<f32> = (0..AUDIO_BUFFER_SAMPLES).map(|i| (i % 997) as f32).collect();
+        // Two writes so the second necessarily wraps past the end.
+        write_audio(&big[..AUDIO_BUFFER_SAMPLES - 500]);
+        write_audio(&big[AUDIO_BUFFER_SAMPLES - 500..]);
+        assert!(!read_like_plugin(&mut consumed, &mut got));
+        assert_eq!(got.len(), AUDIO_BUFFER_SAMPLES);
+        assert_eq!(got, big, "wrapped read must reassemble in order");
+
+        // ── Overrun: writer laps a reader that stopped consuming ──
+        got.clear();
+        let stale_cursor = written_count();
+        let mut lagging = stale_cursor;
+        for _ in 0..3 {
+            write_audio(&big); // three full buffers with no reads
+        }
+        let overrun = read_like_plugin(&mut lagging, &mut got);
+        assert!(overrun, "lapping the reader must be detected, not silent");
+        assert_eq!(got.len(), AUDIO_BUFFER_SAMPLES, "resyncs to the newest buffer");
+        assert_eq!(lagging, written_count(), "reader caught up to the writer");
+
+        set_enabled(false);
+        cleanup();
+    }
+}
+
 /// Check whether ffplay is available (bundled or system).
 pub fn check_ffplay_available(project_root: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    let bundled = format!(r"{}\bin\ffplay.exe", project_root);
+    #[cfg(not(target_os = "windows"))]
     let bundled = format!("{}/bin/ffplay", project_root);
+
     if std::path::Path::new(&bundled).exists() {
         return true;
     }
 
-    std::process::Command::new("which").arg("ffplay")
+    #[cfg(target_os = "windows")]
+    let finder = ("where", "ffplay");
+    #[cfg(not(target_os = "windows"))]
+    let finder = ("which", "ffplay");
+
+    std::process::Command::new(finder.0)
+        .arg(finder.1)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

@@ -7,15 +7,19 @@ use std::io::Cursor;
 /// Must match the mobile's Muxer::frame_packet() magic bytes exactly.
 const MAGIC: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 
-/// Magic header that the mobile muxer prepends to every frame.
-/// Must match the mobile's Muxer::frame_packet() magic bytes exactly.
-const MAGIC: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
-
 /// Minimum header size: 4B magic + 1B type + 4B length = 9 bytes
 const HEADER_SIZE: usize = 9;
 
-/// Maximum payload size we'll accept (64 MB) — anything larger is corrupt
-const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+/// Maximum payload we'll accept. A 4K HEVC keyframe at a high bitrate is a
+/// couple of MB and audio blocks are a few KB, so 8 MB is generous.
+///
+/// The old 64 MB limit meant a single corrupt length field stalled the
+/// demuxer while it buffered up to 64 MB of stream waiting for a frame that
+/// was never coming.
+const MAX_PAYLOAD_SIZE: usize = 8 * 1024 * 1024;
+
+/// Hard cap on the reassembly buffer before we give up and resynchronise.
+const MAX_BUFFER_SIZE: usize = 2 * MAX_PAYLOAD_SIZE;
 
 /// Frame type tags — mirrors the mobile's PacketType enum
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,7 +185,7 @@ impl Demuxer {
         }
 
         // Prevent unbounded buffer growth from corrupt/non-framed data
-        if self.buffer.len() > MAX_PAYLOAD_SIZE {
+        if self.buffer.len() > MAX_BUFFER_SIZE {
             log_event(
                 "ERROR",
                 "DEMUX",

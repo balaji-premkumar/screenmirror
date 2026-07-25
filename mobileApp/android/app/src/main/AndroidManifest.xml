@@ -1,9 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.USB_PERMISSION" />
+    <!-- Android 13+: without this the foreground-service notification is
+         suppressed, and with it the "Stop Mirroring" action. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The app is useless without USB accessory support; declaring it keeps
+         incompatible devices from installing it. -->
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="true" />
 
     <application
         android:label="stream_mobile_app"
@@ -35,9 +42,9 @@
                 android:resource="@xml/accessory_filter" />
         </activity>
 
-        <service 
+        <service
             android:name=".service.MirrorForegroundService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="mediaProjection|microphone"
             android:exported="false" />
 
         <meta-data

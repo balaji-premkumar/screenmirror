@@ -31,15 +31,20 @@ const lib = dlopen(libPath, {
   get_metrics: { args: [], returns: FFIType.ptr },
   free_string: { args: [FFIType.ptr], returns: FFIType.void },
   init_mirror: { args: [FFIType.u32, FFIType.u32], returns: FFIType.i32 },
+  stop_mirror: { args: [], returns: FFIType.i32 },
   get_status: { args: [], returns: FFIType.i32 },
   get_buffer_size: { args: [], returns: FFIType.i32 },
   trigger_manual_handshake: { args: [FFIType.u16, FFIType.u16], returns: FFIType.i32 },
   sync_config: { args: [FFIType.cstring], returns: FFIType.i32 },
   force_disconnect: { args: [], returns: FFIType.i32 },
   toggle_auto_reconnect: { args: [FFIType.i32], returns: FFIType.void },
-  open_native_preview: { args: [FFIType.cstring], returns: FFIType.i32 },
+  // Player (ffplay) — the only path that produces sound on the desktop
+  start_player: { args: [FFIType.cstring], returns: FFIType.i32 },
+  stop_player: { args: [], returns: FFIType.i32 },
+  get_player_state: { args: [], returns: FFIType.i32 },
   // OBS & system detection
   check_obs_installed: { args: [], returns: FFIType.i32 },
+  check_obs_running: { args: [], returns: FFIType.i32 },
   check_obs_plugin_installed: { args: [], returns: FFIType.i32 },
   check_ffplay_available: { args: [FFIType.cstring], returns: FFIType.i32 },
   get_obs_plugin_dir: { args: [], returns: FFIType.ptr },
@@ -76,11 +81,24 @@ const rpc = defineElectrobunRPC('bun', {
                 console.log("Enterprise RPC: Disconnecting device");
                 return lib.symbols.force_disconnect();
             },
-            openNativePreview: async () => {
-                console.log("Enterprise RPC: Opening Native Preview (ffplay)");
+            // NOTE: no stopMirror endpoint. `stop_mirror()` tears down the USB
+            // listener, decoder and shared memory, and only process exit calls
+            // it. Exposing it as an RPC was a trap: nothing in the UI re-runs
+            // init_mirror(), so a "stop" button wired to it would have left the
+            // app inert until restart. Stopping a stream is `syncConfig`
+            // with command "stop", which is what the UI actually uses.
+            // Playback: hands video AND audio to a child ffplay process.
+            // The backend itself never opens an audio device.
+            startPlayer: () => {
+                console.log("Enterprise RPC: Starting ffplay playback (video + audio)");
                 const rootBytes = new TextEncoder().encode(projectRoot + "\0");
-                lib.symbols.open_native_preview(rootBytes);
-                return 0;
+                const result = lib.symbols.start_player(rootBytes);
+                return { success: result === 0 };
+            },
+            stopPlayer: () => {
+                console.log("Enterprise RPC: Stopping ffplay playback");
+                lib.symbols.stop_player();
+                return { success: true };
             },
             toggleObsFeed: (data: any) => {
                 console.log(`Enterprise RPC: OBS Feed toggled to ${data.enabled}`);
@@ -111,7 +129,11 @@ const rpc = defineElectrobunRPC('bun', {
                     devices,
                     newLogs,
                     metrics,
-                    driverOk
+                    driverOk,
+                    // Cached for 3s inside Rust — safe to ask on every tick.
+                    obsRunning: lib.symbols.check_obs_running() === 1,
+                    // 0 = stopped, 1 = starting, 2 = playing
+                    playerState: lib.symbols.get_player_state(),
                 };
             },
             // Startup checks — called once when the loader screen mounts
@@ -138,12 +160,25 @@ const rpc = defineElectrobunRPC('bun', {
     }
 });
 
-// ── Platform-specific initialization ────────────────────────
-// Only call the platform-appropriate setup function
-if (process.platform === 'linux') {
-    lib.symbols.setup_linux_permissions();
-} else if (process.platform === 'win32') {
-    lib.symbols.install_windows_driver();
+// ── Platform-specific driver automation ─────────────────────
+// Run once at startup, and only when the driver is actually missing — both
+// paths raise an elevation prompt (pkexec / UAC), so re-running them on every
+// launch would nag the user for nothing.
+function ensureUsbDriver() {
+    if (lib.symbols.check_driver_status() === 1) {
+        console.log("USB driver/permissions already configured.");
+        return;
+    }
+
+    if (process.platform === 'linux') {
+        console.log("Installing udev rules for AOA access...");
+        const result = lib.symbols.setup_linux_permissions();
+        console.log(`udev rule installation returned ${result}`);
+    } else if (process.platform === 'win32') {
+        console.log("Installing WinUSB driver for AOA accessory...");
+        const result = lib.symbols.install_windows_driver();
+        console.log(`WinUSB driver installation returned ${result}`);
+    }
 }
 
 async function getMainViewUrl(): Promise<string> {
@@ -177,3 +212,26 @@ function readCString(ptr: any): string {
 
 lib.symbols.init_mirror(1920, 1080);
 console.log("Enterprise Mirroring Receiver initialized.");
+
+// Deferred until the window exists. Running this at module load meant the
+// pkexec/UAC prompt appeared before any UI had been drawn, so the user was
+// asked to authorise an elevated action by an application they could not yet
+// see. It also blocked startup on their response.
+setTimeout(ensureUsbDriver, 1500);
+
+// Tear the native pipeline down cleanly so USB interfaces are released and
+// the shared memory segments are unlinked instead of leaking to the next run.
+let shutdownDone = false;
+function shutdown() {
+    if (shutdownDone) return;
+    shutdownDone = true;
+    try {
+        lib.symbols.stop_mirror();
+    } catch (e) {
+        console.error("stop_mirror failed during shutdown", e);
+    }
+}
+
+process.on("exit", shutdown);
+process.on("SIGINT", () => { shutdown(); process.exit(0); });
+process.on("SIGTERM", () => { shutdown(); process.exit(0); });
