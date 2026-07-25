@@ -84,11 +84,20 @@ class _CompanionDashboardState extends State<CompanionDashboard>
 
   // Removed `_checkInitialAccessory()` implementation because it was duplicated in `_setupUsb()`
   Future<void> _requestPermissions() async {
+    // AudioPlaybackCapture captures device/game audio, but Android still
+    // gates it behind the RECORD_AUDIO permission.
     final status = await Permission.microphone.request();
     if (status.isGranted) {
-      _log('SYSTEM', 'Microphone permission granted');
+      _log('SYSTEM', 'Audio capture permission granted');
     } else {
-      _log('WARN', 'Microphone permission denied — audio will not work');
+      _log('WARN', 'Audio permission denied — video will stream without sound');
+    }
+
+    // Android 13+ hides the foreground-service notification without this, and
+    // that notification is the only place the "Stop Mirroring" action lives.
+    final notif = await Permission.notification.request();
+    if (!notif.isGranted) {
+      _log('WARN', 'Notification permission denied — the Stop control may be hidden');
     }
   }
 
@@ -130,6 +139,19 @@ class _CompanionDashboardState extends State<CompanionDashboard>
       } else if (call.method == 'onUsbDetached') {
         _log('USB', 'Accessory detached');
         _onDisconnected();
+      } else if (call.method == 'onProjectionStarted') {
+        // Capture consent granted and the service is up — only now is
+        // anything actually being encoded.
+        _log('CAPTURE', 'Screen capture approved');
+        _setStreaming();
+      } else if (call.method == 'onProjectionDenied') {
+        _log('WARN', 'Screen capture denied — nothing is being sent');
+        if (mounted) {
+          setState(() {
+            _connState = 'connected';
+            _statusMsg = 'Capture declined — press Start on the desktop';
+          });
+        }
       }
       return null;
     });
@@ -158,8 +180,10 @@ class _CompanionDashboardState extends State<CompanionDashboard>
       setState(() => _rustReady = true);
       _log('RUST', 'Native library ready ✓');
     } catch (e) {
-      _log('WARN', 'Rust unavailable: $e');
-      _log('SYSTEM', 'Running in JNI-only mode — streaming still works');
+      // The JNI bridge lives in the same native library as the Rust FFI —
+      // if it failed to load, streaming cannot work either.
+      _log('ERROR', 'Native library unavailable: $e');
+      _log('SYSTEM', 'Streaming disabled — reinstall or restart the app');
     }
   }
 
@@ -175,13 +199,16 @@ class _CompanionDashboardState extends State<CompanionDashboard>
     if (_rustReady) {
       _startRustPipeline(fd);
     } else {
-      // JNI path: MirrorForegroundService pushes directly
-      _log('PIPE', 'Using JNI pipeline (Rust unavailable)');
-      _setStreaming();
+      setState(() {
+        _connState = 'error';
+        _statusMsg = 'Native library missing — cannot stream';
+      });
+      return;
     }
 
     _configPollTimer?.cancel();
     _configPollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
+      if (!_rustReady) return;
       try {
         // 1. Poll for commands from the desktop
         final configStr = rust_api.pollConfig();
@@ -189,7 +216,17 @@ class _CompanionDashboardState extends State<CompanionDashboard>
           _log('CONFIG', 'Received config from desktop: $configStr');
           final config = jsonDecode(configStr);
           if (config["command"] == "start") {
-             _requestMediaProjection(config);
+             // Streaming state is set by the onProjectionStarted callback, not
+             // here: this only opens the system consent dialog, and claiming
+             // "Streaming to PC" before the user has even seen it was wrong
+             // whether or not they went on to approve it.
+             await _requestMediaProjection(config);
+             if (mounted) {
+               setState(() {
+                 _connState = 'connecting';
+                 _statusMsg = 'Waiting for screen capture approval...';
+               });
+             }
           } else if (config["command"] == "stop") {
              _log('CONTROL', 'Desktop requested stop');
              await _ch.invokeMethod('stopService');
@@ -240,11 +277,16 @@ class _CompanionDashboardState extends State<CompanionDashboard>
       _log('PIPE', 'Starting Rust USB streaming on FD=$fd');
       final result = await rust_api.startUsbStreaming(fd: fd);
       _log('SUCCESS', result);
-      _setStreaming();
+      setState(() {
+        _connState = 'connected';
+        _statusMsg = 'Linked — press Start on the desktop';
+      });
     } catch (e) {
       _log('ERROR', 'Rust pipeline failed: $e');
-      _log('PIPE', 'Falling back to JNI mode');
-      _setStreaming();
+      setState(() {
+        _connState = 'error';
+        _statusMsg = 'USB pipeline failed to start';
+      });
     }
   }
 
