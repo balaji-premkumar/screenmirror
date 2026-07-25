@@ -1,9 +1,8 @@
-use crate::push_packet;
 use once_cell::sync::Lazy;
 use rusb::{Context as RusbContext, DeviceHandle, UsbContext};
 use serde::Serialize;
-use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -38,11 +37,61 @@ fn get_log_dir() -> std::path::PathBuf {
             .join(".mirror_stream")
             .join("logs")
     } else {
-        std::path::PathBuf::from("/tmp")
-            .join("mirror_stream")
-            .join("logs")
+        std::env::temp_dir().join("mirror_stream").join("logs")
     }
 }
+
+/// Rotate the log once it passes this size, keeping one previous generation.
+/// Without this `mirror_rust.log.json` grew without limit for the lifetime of
+/// the install.
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+/// Bounded so a burst of errors cannot grow the channel without limit. Logs
+/// are diagnostics: dropping a few under pressure beats unbounded memory on
+/// the streaming threads.
+const LOG_CHANNEL_CAPACITY: usize = 4096;
+
+fn open_log_file(log_path: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .ok()
+}
+
+/// Dedicated log writer thread. Streaming threads only push into a channel;
+/// all file I/O (open/append/flush) happens here, off the hot path.
+static LOG_TX: Lazy<Mutex<mpsc::SyncSender<LogEntry>>> = Lazy::new(|| {
+    let (tx, rx) = mpsc::sync_channel::<LogEntry>(LOG_CHANNEL_CAPACITY);
+    std::thread::spawn(move || {
+        let log_dir = get_log_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("mirror_rust.log.json");
+        let rotated = log_dir.join("mirror_rust.log.json.1");
+
+        let mut file = open_log_file(&log_path);
+        let mut written: u64 = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+
+        while let Ok(entry) = rx.recv() {
+            let Ok(json) = serde_json::to_string(&entry) else {
+                continue;
+            };
+            if let Some(f) = file.as_mut() {
+                if writeln!(f, "{}", json).is_ok() {
+                    written += json.len() as u64 + 1;
+                }
+            }
+            if written >= LOG_ROTATE_BYTES {
+                // Close the handle before renaming — Windows refuses to
+                // rename a file that still has an open handle.
+                drop(file.take());
+                let _ = std::fs::rename(&log_path, &rotated);
+                file = open_log_file(&log_path);
+                written = 0;
+            }
+        }
+    });
+    Mutex::new(tx)
+});
 
 pub fn log_event(level: &str, module: &str, thread: &str, message: &str) {
     let entry = LogEntry {
@@ -53,14 +102,10 @@ pub fn log_event(level: &str, module: &str, thread: &str, message: &str) {
         message: message.to_string(),
     };
 
-    // Write to file log using dynamic path
-    let log_dir = get_log_dir();
-    let log_path = log_dir.join("mirror_rust.log.json");
-    if let Ok(json) = serde_json::to_string(&entry) {
-        let _ = std::fs::create_dir_all(&log_dir);
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = writeln!(file, "{}", json);
-        }
+    // Hand off to the writer thread — no file I/O here, and try_send so a
+    // backed-up writer can never block a streaming thread.
+    if let Ok(tx) = LOG_TX.lock() {
+        let _ = tx.try_send(entry.clone());
     }
 
     if let Ok(mut logs) = LOG_BUFFER.lock() {
@@ -104,7 +149,6 @@ fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), r
     let mut protocol = 0;
     // Attempt multiple variants for picky devices
     for i in 0..5 {
-        // Variant 1: standard index 0
         match handle.read_control(0xC0, 51, 0, 0, &mut buf, timeout) {
             Ok(_) => {
                 protocol = u16::from_le_bytes(buf);
@@ -178,11 +222,16 @@ impl Drop for StreamingActiveGuard {
     fn drop(&mut self) {
         let mut active = STREAMING_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         *active = false;
-        log_event("WARN", "USB", "streaming", "Session guard dropped: Link state reset.");
+        log_event(
+            "WARN",
+            "USB",
+            "streaming",
+            "Session guard dropped: Link state reset.",
+        );
     }
 }
 
-fn start_streaming_loop(device: rusb::Device<RusbContext>) {
+fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
     // Check if a session is already active
     {
         if let Ok(mut active) = STREAMING_ACTIVE.lock() {
@@ -193,17 +242,16 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
         }
     }
 
+    // Tells the decoder this is a fresh bitstream, so it flushes references
+    // from the previous session instead of decoding against them.
+    crate::STREAM_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
     std::thread::spawn(move || {
         let _guard = StreamingActiveGuard;
-        
-        log_event(
-            "INFO",
-            "USB",
-            "streaming",
-            "Starting USB session thread...",
-        );
 
-        let mut handle = match device.open() {
+        log_event("INFO", "USB", "streaming", "Starting USB session thread...");
+
+        let handle = match device.open() {
             Ok(h) => h,
             Err(e) => {
                 log_event(
@@ -271,15 +319,23 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
         let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer
         let mut demuxer = crate::demuxer::Demuxer::new();
         let mut last_activity = Instant::now();
-        let timeout_duration = Duration::from_millis(1000);
-        
+        // Short timeout so pending config commands and shutdown signals are
+        // observed quickly; at 120 fps data arrives every ~8 ms anyway, so
+        // the timeout only fires when the link is idle.
+        let timeout_duration = Duration::from_millis(100);
+
         loop {
-            if crate::TERMINATION_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) {
-                log_event("INFO", "USB", "streaming", "Streaming loop receiving termination signal.");
+            if !crate::session_alive(my_gen) {
+                log_event(
+                    "INFO",
+                    "USB",
+                    "streaming",
+                    "Streaming loop received termination signal.",
+                );
                 break;
             }
 
-            // 1. Check for termination flags
+            // 1. Check for user-triggered disconnect
             if let Ok(mut fd) = FORCE_DISCONNECT.lock() {
                 if *fd {
                     *fd = false;
@@ -297,15 +353,32 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
             if let Some(config_json) = current_config {
                 let mut data = config_json.as_bytes().to_vec();
                 data.push(0); // Null terminator
-                
-                log_event("INFO", "USB", "streaming", &format!("Sending config: {} bytes", data.len()));
+
+                log_event(
+                    "INFO",
+                    "USB",
+                    "streaming",
+                    &format!("Sending config: {} bytes", data.len()),
+                );
                 match handle.write_bulk(endpoint_out, &data, Duration::from_millis(1000)) {
-                    Ok(n) => log_event("SUCCESS", "USB", "streaming", &format!("Config sent ({} bytes)", n)),
+                    Ok(n) => log_event(
+                        "SUCCESS",
+                        "USB",
+                        "streaming",
+                        &format!("Config sent ({} bytes)", n),
+                    ),
                     Err(e) => {
-                        log_event("ERROR", "USB", "streaming", &format!("Config write error: {:?}", e));
+                        log_event(
+                            "ERROR",
+                            "USB",
+                            "streaming",
+                            &format!("Config write error: {:?}", e),
+                        );
                         // Re-queue
                         if let Ok(mut pending) = PENDING_CONFIG.lock() {
-                            if pending.is_none() { *pending = Some(config_json); }
+                            if pending.is_none() {
+                                *pending = Some(config_json);
+                            }
                         }
                     }
                 }
@@ -318,30 +391,42 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>) {
                     if let Ok(mut m) = crate::metrics::METRICS.lock() {
                         m.record_usb_bytes(len);
                     }
-                    
+
                     let frames = demuxer.feed(&buf[..len]);
                     for frame in frames {
-                        if matches!(frame.frame_type, crate::demuxer::FrameType::Video) {
-                            push_packet(frame.data.as_ptr(), frame.data.len());
-                        } else if matches!(frame.frame_type, crate::demuxer::FrameType::Audio) {
-                            crate::audio::push_audio(&frame.data);
+                        match frame.frame_type {
+                            crate::demuxer::FrameType::Video => {
+                                // ffplay gets the encoded stream verbatim; it
+                                // is a no-op (one atomic load) when no player
+                                // session is running.
+                                crate::player::push_video(&frame.data);
+                                // Moves the Vec — no copy on this path.
+                                crate::push_video_packet(frame.data);
+                            }
+                            crate::demuxer::FrameType::Audio => {
+                                crate::audio::push_audio(&frame.data);
+                            }
                         }
                     }
                 }
-                Ok(_) => {
+                Ok(_) | Err(rusb::Error::Timeout) => {
                     if last_activity.elapsed() >= Duration::from_secs(5) {
-                        log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
-                        break;
-                    }
-                }
-                Err(rusb::Error::Timeout) => {
-                    if last_activity.elapsed() >= Duration::from_secs(5) {
-                        log_event("ERROR", "USB", "streaming", "Inactivity timeout: mobile disconnected.");
+                        log_event(
+                            "ERROR",
+                            "USB",
+                            "streaming",
+                            "Inactivity timeout: mobile disconnected.",
+                        );
                         break;
                     }
                 }
                 Err(e) => {
-                    log_event("ERROR", "USB", "streaming", &format!("Fatal Read Error: {:?}. Closing link.", e));
+                    log_event(
+                        "ERROR",
+                        "USB",
+                        "streaming",
+                        &format!("Fatal Read Error: {:?}. Closing link.", e),
+                    );
                     break;
                 }
             }
@@ -386,6 +471,7 @@ pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
         *auto = true;
     }
 
+    let my_gen = crate::current_gen();
     std::thread::spawn(move || {
         let context = match RusbContext::new() {
             Ok(c) => c,
@@ -404,14 +490,20 @@ pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
             for device in devices.iter() {
                 if let Ok(desc) = device.device_descriptor() {
                     if desc.vendor_id() == target_vid && desc.product_id() == target_pid {
-                        // If it's already an accessory, don't reset it as that disconnects the mobile app.
-                        // Instead, just ensure auto-reconnect is enabled and it will be picked up.
+                        // If it's already an accessory, connect immediately instead
+                        // of waiting for the next discovery poll.
                         if target_vid == 0x18D1 && (0x2D00..=0x2D05).contains(&target_pid) {
-                             log_event("INFO", "FFI", "handshake", "Device is already an accessory, skipping reset.");
-                             if let Ok(mut auto) = AUTO_RECONNECT_ENABLED.lock() {
-                                 *auto = true;
-                             }
-                             return;
+                            log_event(
+                                "INFO",
+                                "FFI",
+                                "handshake",
+                                "Device is already an accessory, connecting directly.",
+                            );
+                            if let Ok(mut auto) = AUTO_RECONNECT_ENABLED.lock() {
+                                *auto = true;
+                            }
+                            start_streaming_loop(device, my_gen);
+                            return;
                         }
 
                         match device.open() {
@@ -481,7 +573,7 @@ fn wait_for_aoa_reenumeration(context: &RusbContext) -> i32 {
     -4
 }
 
-pub fn start_usb_listener_thread() {
+pub fn start_usb_listener_thread(my_gen: u64) {
     std::thread::spawn(move || {
         let context = match RusbContext::new() {
             Ok(c) => c,
@@ -506,8 +598,13 @@ pub fn start_usb_listener_thread() {
             std::collections::HashMap::new();
 
         loop {
-            if crate::TERMINATION_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) {
-                log_event("INFO", "SYSTEM", "discovery", "Discovery thread receiving termination signal.");
+            if !crate::session_alive(my_gen) {
+                log_event(
+                    "INFO",
+                    "SYSTEM",
+                    "discovery",
+                    "Discovery thread received termination signal.",
+                );
                 break;
             }
 
@@ -535,6 +632,9 @@ pub fn start_usb_listener_thread() {
                             } else {
                                 let info = get_device_info(&device)
                                     .unwrap_or_else(|| "AOA Accessory".to_string());
+                                if info_cache.len() >= 64 {
+                                    info_cache.clear();
+                                }
                                 info_cache.insert(device_key.clone(), info.clone());
                                 info
                             };
@@ -543,7 +643,7 @@ pub fn start_usb_listener_thread() {
 
                             if let Ok(auto) = AUTO_RECONNECT_ENABLED.lock() {
                                 if *auto {
-                                    start_streaming_loop(device);
+                                    start_streaming_loop(device, my_gen);
                                 }
                             }
                         } else {
@@ -564,6 +664,13 @@ pub fn start_usb_listener_thread() {
                                 } else {
                                     let info = get_device_info(&device)
                                         .unwrap_or_else(|| "Android Device".to_string());
+                                    // Keys include the bus address, which
+                                    // changes on every re-enumeration, so the
+                                    // map would otherwise grow for the life of
+                                    // the process.
+                                    if info_cache.len() >= 64 {
+                                        info_cache.clear();
+                                    }
                                     info_cache.insert(device_key.clone(), info.clone());
                                     info
                                 };
@@ -577,7 +684,12 @@ pub fn start_usb_listener_thread() {
                     }
                 }
                 Err(e) => {
-                    log_event("WARN", "SYSTEM", "discovery", &format!("USB Bus poll failed: {:?}", e));
+                    log_event(
+                        "WARN",
+                        "SYSTEM",
+                        "discovery",
+                        &format!("USB Bus poll failed: {:?}", e),
+                    );
                 }
             }
             std::thread::sleep(Duration::from_secs(2));

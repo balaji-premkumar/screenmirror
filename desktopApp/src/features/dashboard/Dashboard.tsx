@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { StartupChecks, StatusUpdate, LogEntry, Metrics } from "@/types";
+import { StartupChecks, StatusUpdate, LogEntry, Metrics, PlayerState } from "@/types";
 import { LogItem } from "./LogItem";
 
 interface DashboardProps {
@@ -15,14 +15,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
     logs: LogEntry[];
     metrics: Metrics;
     driverOk: boolean;
+    obsRunning: boolean;
+    playerState: PlayerState;
   }>({
     decoder: "Initializing...",
     isConnected: false,
     bufferSize: 0,
     devices: [],
     logs: [],
-    metrics: { throughput_mbps: 0, pipeline_latency_ms: 0, fps_actual: 0, frames_dropped: 0, buffer_health: 0 },
-    driverOk: startupChecks.driverOk
+    metrics: { throughput_mbps: 0, decode_latency_ms: 0, fps_actual: 0, frames_dropped: 0, buffer_health: 0 },
+    driverOk: startupChecks.driverOk,
+    obsRunning: false,
+    playerState: 0
   });
 
   const [config, setConfig] = useState({
@@ -47,7 +51,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
     return window.__mirrorRpc || (window.Electrobun && window.Electrobun.rpc);
   }, []);
 
+  // The OBS feed is only meaningful when the plugin is installed AND OBS is
+  // actually running to read the shared memory.
+  const obsReady = startupChecks.obsInstalled && startupChecks.obsPluginInstalled && status.obsRunning;
+
   const toggleObsFeed = async () => {
+    if (!obsReady) return;
     const newState = !isObsActive;
     try {
       const rpc = getRpc();
@@ -59,6 +68,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
       console.error("OBS Feed toggle failed", e);
     }
   };
+
+  // If OBS goes away while the feed is on, stop writing frames nobody reads.
+  useEffect(() => {
+    if (isObsActive && !obsReady) {
+      const rpc = getRpc();
+      if (rpc) rpc.request('toggleObsFeed', { enabled: false }).catch(() => {});
+      setIsObsActive(false);
+    }
+  }, [isObsActive, obsReady, getRpc]);
 
   // Poll status from Bun process via RPC every 500ms
   useEffect(() => {
@@ -88,14 +106,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
             const newDevices = data.devices || [];
             const devicesChanged = JSON.stringify(prev.devices) !== JSON.stringify(newDevices);
             
-            const newMetrics = nextIsConnected ? (data.metrics || prev.metrics) : { throughput_mbps: 0, pipeline_latency_ms: 0, fps_actual: 0, frames_dropped: 0, buffer_health: 0 };
-            const metricsChanged = 
+            const newMetrics = nextIsConnected ? (data.metrics || prev.metrics) : { throughput_mbps: 0, decode_latency_ms: 0, fps_actual: 0, frames_dropped: 0, buffer_health: 0 };
+            const metricsChanged =
                 Math.abs(prev.metrics.throughput_mbps - newMetrics.throughput_mbps) > 0.05 ||
-                Math.abs(prev.metrics.fps_actual - newMetrics.fps_actual) > 0.5;
+                Math.abs(prev.metrics.fps_actual - newMetrics.fps_actual) > 0.5 ||
+                prev.metrics.frames_dropped !== newMetrics.frames_dropped ||
+                prev.metrics.decode_latency_ms !== newMetrics.decode_latency_ms ||
+                Math.abs(prev.metrics.buffer_health - newMetrics.buffer_health) > 0.02;
 
             const hasNewLogs = data.newLogs && data.newLogs.length > 0;
+            const obsRunningChanged = prev.obsRunning !== data.obsRunning;
+            const playerStateChanged = prev.playerState !== data.playerState;
 
-            if (!isConnectedChanged && !driverOkChanged && !devicesChanged && !metricsChanged && !hasNewLogs && prev.bufferSize === data.bufferSize) {
+            if (!isConnectedChanged && !driverOkChanged && !devicesChanged && !metricsChanged && !hasNewLogs && !obsRunningChanged && !playerStateChanged && prev.bufferSize === data.bufferSize) {
                 return prev;
             }
 
@@ -107,6 +130,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
               devices: devicesChanged ? newDevices : prev.devices,
               metrics: newMetrics,
               driverOk: data.driverOk,
+              obsRunning: data.obsRunning,
+              playerState: data.playerState,
               logs: hasNewLogs ? [...prev.logs, ...data.newLogs].slice(-300) : (isConnectedChanged && !nextIsConnected ? [] : prev.logs)
             };
           });
@@ -203,14 +228,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
     }
   };
 
-  const openNativePreview = async () => {
+  // The player is a child ffplay window carrying both video and audio.
+  // Nothing plays until the user asks for it here.
+  const togglePlayer = async () => {
     if (isOpeningPreview) return;
     setIsOpeningPreview(true);
     try {
       const rpc = getRpc();
-      if (rpc) await rpc.request('openNativePreview');
+      if (rpc) {
+        await rpc.request(status.playerState === 0 ? 'startPlayer' : 'stopPlayer');
+      }
     } catch (e) {
-      console.error("Preview launch failed", e);
+      console.error("Player toggle failed", e);
     } finally {
       setIsOpeningPreview(false);
     }
@@ -251,24 +280,71 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
                 <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Sync Rate</div>
                 <div className={`text-xl font-black ${status.metrics.fps_actual > 0 ? 'text-blue-400' : 'text-gray-700'}`}>{status.metrics.fps_actual.toFixed(1)} <span className="text-[10px]">FPS</span></div>
             </div>
+            <div className="text-right">
+                <div className="text-[9px] text-gray-500 font-bold uppercase tracking-widest mb-1">Buffer Health</div>
+                <div className={`text-xl font-black ${!status.isConnected ? 'text-gray-700' : status.metrics.buffer_health > 0.6 ? 'text-green-400' : status.metrics.buffer_health > 0.3 ? 'text-yellow-400' : 'text-red-400'}`}>
+                    {(status.metrics.buffer_health * 100).toFixed(0)}<span className="text-[10px]">%</span>
+                    {status.metrics.frames_dropped > 0 && (
+                        <span className="text-[9px] text-red-400 ml-2">{status.metrics.frames_dropped} drop</span>
+                    )}
+                </div>
+            </div>
             <div className="flex gap-2">
-                {/* OBS Feed Toggle - always show if OBS was detected */}
+                {/* OBS feed — only offered once the plugin is installed and
+                    OBS is actually running to read the shared memory. */}
                 {startupChecks.obsInstalled && (
-                <button 
+                <button
                     onClick={toggleObsFeed}
-                    className={`text-[10px] font-black uppercase px-4 py-3 rounded-xl border transition-all shadow-xl active:scale-[0.98] cursor-pointer ${isObsActive ? 'bg-blue-600 border-blue-400 text-white shadow-blue-900/20' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+                    disabled={!obsReady}
+                    title={
+                      !startupChecks.obsPluginInstalled
+                        ? 'Install the Mirror Source plugin first'
+                        : !status.obsRunning
+                          ? 'Start OBS Studio to enable the feed'
+                          : isObsActive
+                            ? 'Stop sending frames to OBS'
+                            : 'Send video and audio to the OBS Mirror Source'
+                    }
+                    className={`flex items-center gap-2 text-[10px] font-black uppercase px-4 py-3 rounded-xl border transition-all shadow-xl active:scale-[0.98] ${
+                      !obsReady
+                        ? 'bg-gray-900 border-gray-800 text-gray-600 cursor-not-allowed'
+                        : isObsActive
+                          ? 'bg-blue-600 border-blue-400 text-white shadow-blue-900/20 cursor-pointer'
+                          : 'bg-gray-800 border-gray-700 text-gray-400 cursor-pointer'
+                    }`}
                 >
-                    {isObsActive ? 'OBS Feed: Active' : 'Direct to OBS'}
+                    <span className={`w-1.5 h-1.5 rounded-full ${isObsActive ? 'bg-white animate-pulse' : obsReady ? 'bg-blue-400' : 'bg-gray-700'}`}></span>
+                    {isObsActive
+                      ? 'OBS Feed: Live'
+                      : !startupChecks.obsPluginInstalled
+                        ? 'OBS: Plugin Missing'
+                        : !status.obsRunning
+                          ? 'OBS: Not Running'
+                          : 'Send to OBS'}
                 </button>
                 )}
-                {/* Preview button - always available as native fallback for OBS window capture */}
+
+                {/* Playback — a child ffplay window with video and audio.
+                    The app itself never opens an audio device. */}
                 {status.isConnected && startupChecks.ffplayOk && (
-                <button 
-                    onClick={openNativePreview} 
-                    disabled={isOpeningPreview}
-                    className={`bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black uppercase px-6 py-3 rounded-xl transition-all shadow-xl shadow-orange-900/20 active:scale-[0.98] cursor-pointer ${isOpeningPreview ? 'opacity-50 cursor-wait' : ''}`}
+                <button
+                    onClick={togglePlayer}
+                    disabled={isOpeningPreview || status.playerState === 1}
+                    title={status.playerState === 0
+                      ? 'Open a player window with video and sound'
+                      : 'Close the player window'}
+                    className={`flex items-center gap-2 text-white text-[10px] font-black uppercase px-6 py-3 rounded-xl transition-all shadow-xl active:scale-[0.98] ${
+                      status.playerState === 2
+                        ? 'bg-red-600 hover:bg-red-500 shadow-red-900/20 cursor-pointer'
+                        : 'bg-orange-600 hover:bg-orange-500 shadow-orange-900/20 cursor-pointer'
+                    } ${isOpeningPreview || status.playerState === 1 ? 'opacity-60 cursor-wait' : ''}`}
                 >
-                    {isOpeningPreview ? 'Launching...' : 'Launch Video Preview'}
+                    {status.playerState === 2 ? '■' : '▶'}
+                    {status.playerState === 1
+                      ? 'Buffering...'
+                      : status.playerState === 2
+                        ? 'Stop Playback'
+                        : 'Play Video + Audio'}
                 </button>
                 )}
             </div>
@@ -354,13 +430,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ startupChecks }) => {
                     {status.devices.length === 0 ? (
                         <div className="flex items-center gap-3 text-sm text-gray-600 italic py-4 animate-pulse">Scanning high-speed USB bus...</div>
                     ) : (
-                        status.devices.map((dev) => {
+                        status.devices.map((dev, devIndex) => {
                             const [devType, name, id] = dev.split('|');
                             const isAccessory = devType === 'Accessory';
                             const isStreaming = isAccessory && status.isConnected;
                             const isLinking = linkingId === dev;
                             return (
-                                <div key={id} className={`flex justify-between items-center bg-black/40 p-4 rounded-xl border transition-all ${isStreaming ? 'border-green-500/30' : 'border-gray-800/50 hover:border-orange-500/30'}`}>
+                                <div key={`${id}-${devIndex}`} className={`flex justify-between items-center bg-black/40 p-4 rounded-xl border transition-all ${isStreaming ? 'border-green-500/30' : 'border-gray-800/50 hover:border-orange-500/30'}`}>
                                     <div className="flex items-center gap-4">
                                         <div className={`w-2 h-2 rounded-full ${isStreaming ? 'bg-green-400 shadow-[0_0_10px_#4ade80]' : 'bg-blue-400'}`}></div>
                                         <div>
