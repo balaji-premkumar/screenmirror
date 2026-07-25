@@ -12,10 +12,10 @@ By leveraging the **Android Open Accessory (AOA) protocol**, ScreenMirror provid
 
 ## ✨ Features
 
-- **🚀 Ultra-Low Latency**: End-to-end latency optimized via Rust core and FFmpeg hardware acceleration.
-- **🔗 USB-AOA Protocol**: Pure USB streaming without requiring ADB, Developer Options (after initial setup), or network dependency.
-- **🔊 Audio Mirroring**: Real-time system audio streaming powered by high-performance Oboe (Android) and CPAL (Desktop).
-- **🎥 OBS Studio Integration**: Direct-to-SHM feed for OBS, enabling high-quality recording and streaming without capture cards.
+- **🚀 Ultra-Low Latency**: End-to-end latency optimized via Rust core and FFmpeg hardware acceleration (VAAPI/NVDEC on Linux, D3D11VA/DXVA2 on Windows, VideoToolbox on macOS) with a multithreaded software fallback.
+- **🔗 USB-AOA Protocol**: Pure USB streaming without requiring ADB, Developer Options (after initial setup), or network dependency. USB permissions/drivers are configured automatically on first launch (udev on Linux, WinUSB on Windows).
+- **🔊 Audio Mirroring**: Real-time system/game audio via Android `AudioPlaybackCapture` (48 kHz f32 mono) played back through CPAL and forwarded to OBS.
+- **🎥 OBS Studio Integration**: Direct-to-SHM feed for OBS on Linux and Windows, enabling high-quality recording and streaming without capture cards.
 - **📈 Live Diagnostics**: Real-time telemetry including FPS, throughput (Mbps), and decoder health.
 - **🖥️ Cross-Platform**: Native desktop receiver built with Electrobun (Bun + React) supporting Linux, Windows, and macOS.
 
@@ -35,9 +35,9 @@ By leveraging the **Android Open Accessory (AOA) protocol**, ScreenMirror provid
 ### Mobile Companion (`/mobileApp`)
 - **Frontend**: Flutter.
 - **Native Core**: 
-  - **Rust**: Frame muxing and AOA protocol management.
-  - **Oboe**: Low-latency C++ audio capture engine.
-  - **MediaProjection**: High-speed screen capture API.
+  - **Rust**: Frame muxing, non-blocking transport queues and AOA protocol management.
+  - **AudioPlaybackCapture**: System/game audio capture bound to the MediaProjection session.
+  - **MediaProjection + MediaCodec**: High-speed screen capture and HEVC encoding (up to the device's advertised frame-rate limit).
 
 ---
 

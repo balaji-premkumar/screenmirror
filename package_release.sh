@@ -27,17 +27,27 @@ cd mobileApp
 flutter build apk --release
 cd ..
 
-# 3. Build OBS Plugin
+# 3. Build OBS Plugin (CMake handles Linux/macOS/Windows)
 echo "Building OBS Plugin..."
 cd desktopApp/obs_plugin
-mkdir -p build
-gcc -shared -fPIC -o build/mirror-source.so mirror_source.c -I/usr/include/obs -lobs -lrt
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 cd ../..
 
 # 4. Bundle everything
 echo "Bundling artifacts..."
 cp mobileApp/build/app/outputs/flutter-apk/app-release.apk "$RELEASE_DIR/mobile/mirror-companion.apk"
-cp desktopApp/obs_plugin/build/mirror-source.so "$RELEASE_DIR/obs_plugin/"
+
+# The desktop app installs the plugin from desktopApp/bin/, so stage it there too.
+mkdir -p desktopApp/bin
+PLUGIN_BIN=$(find desktopApp/obs_plugin/build -maxdepth 2 -name 'mirror-source.*' \
+    \( -name '*.so' -o -name '*.dll' -o -name '*.dylib' \) | head -1)
+if [ -n "$PLUGIN_BIN" ]; then
+    cp "$PLUGIN_BIN" "$RELEASE_DIR/obs_plugin/"
+    cp "$PLUGIN_BIN" desktopApp/bin/
+else
+    echo "WARNING: OBS plugin binary not found — skipping plugin bundling"
+fi
 
 # Copy desktop binaries (platform specific)
 if [ "$PLATFORM" == "linux" ]; then
