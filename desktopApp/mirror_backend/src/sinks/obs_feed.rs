@@ -510,6 +510,94 @@ pub fn install_plugin(project_root: &str) -> i32 {
     0
 }
 
+/// Checks that this file and `obs_plugin/mirror_source.c` still agree about
+/// the bytes they share.
+///
+/// Separate from the `unix`-only tests below because a layout mismatch is
+/// equally fatal on Windows, and reading a source file needs no platform
+/// support at all.
+///
+/// The C side has `_Static_assert`s for its own struct sizes, which catch a
+/// C-only mistake. What neither side could catch alone is the two drifting
+/// apart — and a drift here does not crash: OBS reads a plausible-looking
+/// number from the wrong offset and renders silence or noise.
+#[cfg(test)]
+mod layout {
+    use super::{AUDIO_HEADER_SIZE, AUDIO_OFF_SESSION, AUDIO_OFF_WRITTEN};
+
+    /// The plugin source, read at compile time so the test cannot go stale by
+    /// pointing at a file that has moved.
+    const PLUGIN_SOURCE: &str = include_str!("../../../obs_plugin/mirror_source.c");
+
+    /// Field sizes, in declaration order, of `struct audio_shm_header`.
+    fn c_audio_header_fields() -> Vec<(String, usize)> {
+        let start = PLUGIN_SOURCE
+            .find("struct audio_shm_header {")
+            .expect("mirror_source.c no longer declares struct audio_shm_header");
+        let body_start = PLUGIN_SOURCE[start..].find('{').unwrap() + start + 1;
+        let body_end = PLUGIN_SOURCE[body_start..].find('}').unwrap() + body_start;
+
+        let mut fields = Vec::new();
+        for line in PLUGIN_SOURCE[body_start..body_end].lines() {
+            // Drop comments and whitespace, keep the declaration.
+            let code = line.split("/*").next().unwrap_or("").trim();
+            let Some(decl) = code.strip_suffix(';') else {
+                continue;
+            };
+            let decl = decl.replace("volatile", "");
+            let mut parts = decl.split_whitespace().collect::<Vec<_>>();
+            let Some(name) = parts.pop() else { continue };
+            let ty = parts.join(" ");
+
+            let size = match ty.as_str() {
+                "uint64_t" => 8,
+                "uint32_t" => 4,
+                "char" if name.ends_with("[4]") => 4,
+                other => panic!("unhandled C type {other:?} in audio_shm_header"),
+            };
+            fields.push((name.to_string(), size));
+        }
+        fields
+    }
+
+    #[test]
+    fn the_audio_header_matches_the_plugin() {
+        let fields = c_audio_header_fields();
+        assert!(!fields.is_empty(), "parsed no fields out of the C struct");
+
+        let mut offsets = std::collections::HashMap::new();
+        let mut offset = 0usize;
+        for (name, size) in &fields {
+            offsets.insert(name.as_str(), offset);
+            offset += size;
+        }
+
+        assert_eq!(
+            offset, AUDIO_HEADER_SIZE,
+            "the C header is {offset} bytes but Rust writes {AUDIO_HEADER_SIZE}; \
+             fields parsed: {fields:?}"
+        );
+        assert_eq!(
+            offsets.get("written").copied(),
+            Some(AUDIO_OFF_WRITTEN),
+            "`written` is at a different offset in C than Rust writes it"
+        );
+        assert_eq!(
+            offsets.get("session").copied(),
+            Some(AUDIO_OFF_SESSION),
+            "`session` is at a different offset in C than Rust writes it"
+        );
+    }
+
+    #[test]
+    fn the_plugin_still_asserts_its_own_sizes() {
+        // If these are ever removed, a C-side struct change stops being caught
+        // at compile time and this module becomes the only guard.
+        assert!(PLUGIN_SOURCE.contains("sizeof(struct audio_shm_header) == 32"));
+        assert!(PLUGIN_SOURCE.contains("sizeof(struct mpro_frame_header) == 64"));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

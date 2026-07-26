@@ -6,40 +6,61 @@ on:
 
 jobs:
   build_android:
-    name: Build Android App
+    name: Android APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
+          cache: true
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobileApp/rust
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk
+        run: cargo install cargo-ndk --locked
 
-      - name: Flutter Pub Get
+      - name: Fetch packages
+        working-directory: mobileApp
         run: flutter pub get
-        working-directory: mobileApp
 
-      - name: Build Android APK
-        run: flutter build apk --release
+      # The ABI list matches the default in android/app/build.gradle.kts. Naming
+      # it here means a change to that default does not silently change what
+      # ships.
+      - name: Build the APK
         working-directory: mobileApp
+        run: flutter build apk --release -PmirrorAbis=arm64-v8a,armeabi-v7a,x86_64
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      # The release build falls back to the debug signing key when
+      # android/key.properties is absent, and logs a warning saying so. A
+      # debug-signed APK must never be published: the key is public, so anyone
+      # can re-sign and impersonate the build.
+      - name: Refuse to publish a debug-signed APK
+        working-directory: mobileApp
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          if unzip -p "$apk" META-INF/*.RSA 2>/dev/null \
+             | keytool -printcert 2>/dev/null \
+             | grep -q "CN=Android Debug"; then
+            echo "::error::The APK is signed with the debug key. Configure android/key.properties."
+            exit 1
+          fi
+          echo "APK is not debug-signed."
+
+      - uses: actions/upload-artifact@v4
         with:
           name: mirror-companion-apk
           path: mobileApp/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

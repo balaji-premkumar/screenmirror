@@ -1,7 +1,17 @@
 # Project Issue Tracker & Roadmap 🗺️
 
+> **Historical snapshot.** This describes the codebase as of July 2026, before
+> the enterprise restructure. Paths in it are pre-move — `mirror_backend/src/`
+> was flat then, and the shared `packages/` crates did not exist. It is kept
+> because the reasoning is still useful, not because it is current.
+>
+> For how the project is arranged now, see
+> [docs/ARCHITECTURE.md](../ARCHITECTURE.md). For open work, see
+> [GitHub Issues](https://github.com/balaji-premkumar/screenmirror/issues).
+
+
 Tracks performance bottlenecks, stability issues, and planned improvements for the ScreenMirror pipeline.
-See [CODE_REVIEW_REPORT.md](CODE_REVIEW_REPORT.md) for the full audit this list is derived from.
+See [the code review](2026-07-code-review.md) for the full audit this list is derived from.
 
 ## ✅ Resolved (2026-07-25 pipeline overhaul)
 

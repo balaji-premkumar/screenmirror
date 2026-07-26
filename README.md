@@ -53,18 +53,32 @@ AudioPlaybackCapture (f32 48kHz) ─────┤
                                                    └─→ decoder ─→ OBS shared memory
 ```
 
-### Desktop Receiver (`/desktopApp`)
-- **Frontend**: React 18 + Tailwind CSS on [Electrobun](https://electrobun.dev/) (Bun-based native shell).
-- **Core (`mirror_backend`, Rust)**: packet demuxing, transport queues, FFmpeg HEVC decoding, and the Matroska remuxer that feeds `ffplay`.
-- **Shared memory**: triple-buffered with a per-slot seqlock for the OBS plugin; a separate ring buffer carries audio.
+### Repository layout
 
-### Mobile Companion (`/mobileApp`)
-- **Frontend**: Flutter.
-- **Native core (Rust)**: frame muxing, non-blocking transport queues, AOA session management.
-- **Capture**: `MediaProjection` + `MediaCodec` for HEVC, `AudioPlaybackCapture` for system audio.
+```
+packages/
+  mirror-protocol/   the wire format and HEVC helpers, shared by both ends
+  mirror-i18n/       event codes and locale catalogs, shared by both ends
+desktopApp/
+  mirror_backend/    Rust: ffi/ pipeline/ sinks/ platform/ telemetry/
+  obs_plugin/        C: the OBS source that maps the shared memory
+  src/               TypeScript: the Electrobun shell and the React UI
+mobileApp/
+  rust/              Rust: capture muxing and the USB write loop
+  lib/               Dart: app/ features/ services/ models/ l10n/
+  android/           Kotlin: MediaProjection, MediaCodec, the service
+docs/                architecture notes and decision records
+tools/               release packaging
+```
 
-### OBS Plugin (`/desktopApp/obs_plugin`)
-C source building on Linux, Windows and macOS. Reads the shared-memory segments directly.
+The two `packages/` crates are the only code both sides share, and each exists
+because duplicating it had already caused a problem — the frame format was
+written in one place and parsed in another with no compiler link between them,
+and the HEVC bitstream walker had four copies that had already drifted.
+
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has the detail, including a
+table mapping "I want to add X" to the directory it belongs in.
+**[docs/adr/](docs/adr/)** records the decisions that were not obvious.
 
 ---
 
@@ -102,9 +116,14 @@ cd screenmirror
 ```bash
 cd desktopApp
 bun install
-bun run build:rust   # compiles the Rust backend
+bun run build:all    # Rust backend, OBS plugin, native bundle, renderer
 bun run dev          # starts the app in dev mode
 ```
+
+`build:all` needs `libobs-dev` for the OBS plugin step. Without it, use
+`bun run build:rust && bun run build:bundle && bun run build:vite` — the
+desktop app runs fine without the plugin, and the *Send to OBS* control simply
+stays unavailable.
 
 #### 3. Mobile (companion)
 ```bash
@@ -159,20 +178,23 @@ Desktop logs are written to `~/.mirror_stream/logs/mirror_rust.log.json`.
 
 ## 🤝 Contributing
 
-Contributions welcome. [ISSUES.md](ISSUES.md) tracks the roadmap and known bottlenecks; GitHub Issues tracks actionable work.
+Contributions welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the
+setup, the checks, and where things go.
 
-1. Fork the project.
-2. Create your branch (`git checkout -b feat/amazing-feature`).
-3. Commit (`git commit -m 'feat: add amazing feature'`).
-4. Push and open a Pull Request.
-
-Please run the test suites before opening a PR:
+The short version:
 
 ```bash
-cd desktopApp/mirror_backend && cargo test --release
-cd mobileApp/rust && cargo test
-cd mobileApp && flutter analyze
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd mobileApp/rust && cargo test)
+(cd desktopApp && bun run typecheck)
+(cd mobileApp && flutter analyze && flutter test)
 ```
+
+Adding a language does not require touching any of that — see
+**[docs/i18n.md](docs/i18n.md)**. It is four JSON/ARB/XML files, and the tests
+will tell you if you missed a string.
 
 ---
 

@@ -14,8 +14,8 @@ pub struct MetricsSnapshot {
     /// Named for what it measures. The previous `pipeline_latency_ms` timed
     /// only the delivery function's own body, so it reported memcpy duration
     /// under a name that implied end-to-end latency. Genuine end-to-end
-    /// latency is not measurable without a sender-side capture timestamp
-    /// (ISSUES.md item 1).
+    /// latency is not measurable without a sender-side capture timestamp on
+    /// the wire — see "Known gaps" in `docs/ARCHITECTURE.md`.
     pub decode_latency_ms: u64,
     pub fps_actual: f64,
     pub frames_dropped: u64,

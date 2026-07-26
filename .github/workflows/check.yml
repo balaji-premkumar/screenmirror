@@ -1,0 +1,115 @@
+name: Checks
+
+# Every check that does not need to produce an artifact. Runs on pull requests
+# so a failure is attached to the change that caused it, rather than being
+# discovered at release time.
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_call:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg-sys-next builds bindings with bindgen, which needs libclang.
+      # Its absence was the Linux half of issue #5.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang libclang-dev pkg-config \
+            libavcodec-dev libavformat-dev libswscale-dev libavutil-dev
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # A separate workspace, because it cross-compiles to Android and must not
+      # drag the ffmpeg-dependent backend into a mobile build.
+      - name: Mobile crate
+        working-directory: mobileApp/rust
+        run: |
+          cargo fmt --check
+          cargo test
+
+  shared-crates-portability:
+    name: Shared crates build for Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      # mirror-protocol is depended on by the mobile crate, so it has to build
+      # for a phone. Catching that here is cheaper than finding it in the APK
+      # job, which needs the whole Flutter and NDK toolchain first.
+      - name: Cross-compile the shared crates
+        run: cargo build -p mirror-protocol --target aarch64-linux-android
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        working-directory: desktopApp
+        run: bun install
+
+      - name: Type-check
+        working-directory: desktopApp
+        run: bun run typecheck
+
+      # Proves the shared i18n catalog still resolves through the @catalog
+      # alias, which a type-check alone does not exercise.
+      - name: Build the renderer bundle
+        working-directory: desktopApp
+        run: bun run build:vite
+
+  flutter:
+    name: Flutter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Fetch packages
+        working-directory: mobileApp
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: mobileApp
+        run: flutter analyze
+
+      - name: Test
+        working-directory: mobileApp
+        run: flutter test

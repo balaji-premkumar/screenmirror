@@ -1,5 +1,15 @@
 # ScreenMirror — Code Review & Pipeline Overhaul
 
+> **Historical snapshot.** This describes the codebase as of July 2026, before
+> the enterprise restructure. Paths in it are pre-move — `mirror_backend/src/`
+> was flat then, and the shared `packages/` crates did not exist. It is kept
+> because the reasoning is still useful, not because it is current.
+>
+> For how the project is arranged now, see
+> [docs/ARCHITECTURE.md](../ARCHITECTURE.md). For open work, see
+> [GitHub Issues](https://github.com/balaji-premkumar/screenmirror/issues).
+
+
 **Original review:** 2026-07-25 · **Fixes applied:** 2026-07-25
 **Scope:** `desktopApp` (Electrobun + Rust backend), `mobileApp` (Flutter + Kotlin + Rust), OBS plugin, platform driver automation.
 
@@ -266,7 +276,7 @@ Why each is needed:
 
 ## 7. Known Remaining Work
 
-Tracked in [ISSUES.md](ISSUES.md). The most valuable next step is **source timestamps**: the wire protocol still has no sender-side capture time, so the receiver invents one. Without it, end-to-end latency and jitter cannot be measured honestly and A/V sync is best-effort. A 64-bit microsecond field in the frame header would make the remaining tuning measurable instead of inferred.
+Tracked in [the issue list](2026-07-pipeline-audit-issues.md). The most valuable next step is **source timestamps**: the wire protocol still has no sender-side capture time, so the receiver invents one. Without it, end-to-end latency and jitter cannot be measured honestly and A/V sync is best-effort. A 64-bit microsecond field in the frame header would make the remaining tuning measurable instead of inferred.
 
 Other open items: zero-copy GPU path to OBS (currently downloads and converts on the CPU), dynamic rotation handling, per-packet CRC, and a signed Windows driver package so the INF fallback works without libwdi.
 
