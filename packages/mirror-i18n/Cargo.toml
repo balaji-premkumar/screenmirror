@@ -1,0 +1,15 @@
+[package]
+name = "mirror-i18n"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Event codes and locale catalogs shared by the Mirror backend and its user interfaces."
+publish = false
+
+[dependencies]
+once_cell = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.rust]
+missing_docs = "warn"

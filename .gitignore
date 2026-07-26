@@ -54,8 +54,17 @@ local.properties
 # Logs
 *.log
 
-# Large Binaries / Bundled Tools
-desktopApp/desktopApp/bin/ffmpeg
-desktopApp/desktopApp/bin/ffplay
-desktopApp/bin/ffmpeg
-desktopApp/bin/ffplay
+# ── Build output ────────────────────────────────────────────
+# None of the following is source. It is produced by `bun run build:all`
+# and published by CI as release assets, so it must not live in git:
+#   bin/          <- scripts/bundle.sh copies the Rust and OBS libraries here
+#   views/        <- electrobun.config.ts copies dist/ here at bundle time
+#   obs_plugin/build/  <- CMake / gcc output
+# Vendored ffmpeg and ffplay binaries land in bin/ too and are large.
+desktopApp/bin/
+desktopApp/views/
+desktopApp/obs_plugin/build/
+
+# ── Generated i18n bindings ─────────────────────────────────
+# `flutter gen-l10n` regenerates these from lib/src/l10n/*.arb on every build.
+mobileApp/lib/src/l10n/generated/

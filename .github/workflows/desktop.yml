@@ -6,7 +6,7 @@ on:
 
 jobs:
   build_desktop:
-    name: Build Desktop (${{ matrix.os }})
+    name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -16,47 +16,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg-sys-next needs the FFmpeg development libraries to link, and
+      # bindgen needs libclang to generate the bindings. Every platform has to
+      # supply both, which is what issue #5 was about: Windows installed no
+      # FFmpeg at all, and Linux installed FFmpeg but not clang.
+      - name: FFmpeg and clang (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libavcodec-dev libavformat-dev libswscale-dev libavutil-dev libsdl2-dev
+          sudo apt-get install -y \
+            clang libclang-dev pkg-config \
+            libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
+            libwebkit2gtk-4.1-dev
 
-      - name: Install dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+      - name: FFmpeg and clang (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config llvm
+
+      # There is no FFmpeg dev package on the Windows runners, so fetch a
+      # prebuilt shared build and point the ffmpeg-sys build script at it.
+      - name: FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          brew install ffmpeg sdl2 pkg-config
+          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip'
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath $env:RUNNER_TEMP
+          $dir = (Get-ChildItem "$env:RUNNER_TEMP/ffmpeg-*-full_build-shared")[0].FullName
+          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$dir/bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Install JS dependencies
+        working-directory: desktopApp
         run: bun install
-        working-directory: desktopApp
 
-      - name: Build Rust Backend
-        run: cargo build --release
-        working-directory: desktopApp/mirror_backend
+      - name: Build the backend
+        run: cargo build --release -p mirror_backend
         env:
-          PKG_CONFIG_PATH: ${{ matrix.os == 'macos-latest' && '/usr/local/opt/ffmpeg/lib/pkgconfig' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg/lib/pkgconfig:/opt/homebrew/opt/ffmpeg/lib/pkgconfig' || '' }}
 
-      - name: Bundle Native Libraries
-        run: bash scripts/bundle.sh
+      # Cross-platform since it became a Bun script. The shell version it
+      # replaced could not run here at all on Windows, so that job built the
+      # DLL and then bundled nothing.
+      - name: Bundle native libraries
         working-directory: desktopApp
+        run: bun run build:bundle
 
-      - name: Build Electrobun App
-        run: bun run build:vite && npx electrobun build
+      - name: Build the app
         working-directory: desktopApp
+        run: |
+          bun run build:vite
+          bunx electrobun build
 
-      - name: Upload Binary
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: mirror-desktop-${{ matrix.os }}
           path: |
             desktopApp/build/
             desktopApp/bin/
-            desktopApp/mirror_backend/target/release/libmirror_backend.*
-            desktopApp/mirror_backend/target/release/mirror_backend.dll
+          if-no-files-found: error

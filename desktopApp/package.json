@@ -1,20 +1,24 @@
 {
-	"name": "electrobun-react-tailwind-vite",
+	"name": "mirror-desktop",
 	"version": "1.0.0",
-	"description": "Electrobun app with React, Tailwind CSS, and Vite HMR",
+	"private": true,
+	"description": "Desktop receiver for the Mirror USB screen and audio link.",
+	"license": "MIT",
 	"main": "src/bun/index.ts",
 	"scripts": {
-		"build:rust": "cd mirror_backend && cargo build --release",
-		"build:plugin": "cd obs_plugin && mkdir -p build && gcc -shared -fPIC -o build/mirror-source.so mirror_source.c -I/usr/include/obs -I. -lobs -lrt",
-		"build:bundle": "bash scripts/bundle.sh",
+		"build:rust": "cargo build --release -p mirror_backend --manifest-path ../Cargo.toml",
+		"build:plugin": "cmake -S obs_plugin -B obs_plugin/build && cmake --build obs_plugin/build --config Release",
+		"build:bundle": "bun run scripts/bundle.ts",
 		"build:vite": "vite build",
 		"build:all": "bun run build:rust && bun run build:plugin && bun run build:bundle && bun run build:vite",
+		"build:canary": "bun run build:all && electrobun build --env=canary",
 		"start": "bun run build:all && electrobun dev",
 		"dev": "electrobun dev --watch",
 		"dev:full": "bun run build:rust && concurrently \"bun run hmr\" \"electrobun dev --watch\"",
 		"dev:hmr": "concurrently \"bun run hmr\" \"bun run start\"",
 		"hmr": "vite --port 5173",
-		"build:canary": "bun run build:all && electrobun build --env=canary"
+		"typecheck": "tsc --noEmit",
+		"test:rust": "cargo test --workspace --manifest-path ../Cargo.toml"
 	},
 	"dependencies": {
 		"electrobun": "1.15.1",
@@ -25,7 +29,6 @@
 		"@types/bun": "latest",
 		"@types/react": "^18.3.12",
 		"@types/react-dom": "^18.3.1",
-		"@types/three": "^0.183.1",
 		"@vitejs/plugin-react": "^4.3.4",
 		"autoprefixer": "^10.4.20",
 		"concurrently": "^9.1.0",

@@ -1,0 +1,6 @@
+# Defaults, pinned so a contributor on a different toolchain formats the same
+# way. `cargo fmt --check` runs in CI, and an unpinned default that shifts
+# between releases turns into a diff nobody asked for.
+edition = "2021"
+max_width = 100
+newline_style = "Unix"

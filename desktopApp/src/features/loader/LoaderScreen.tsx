@@ -1,236 +1,287 @@
-import { useState, useEffect, useCallback } from "react";
-import { StartupChecks, CheckItem, CheckStatus } from "@/types";
-import LogoIcon from "@/components/ui/LogoIcon";
+import { useEffect, useState } from 'react';
+import LogoIcon from '@/components/ui/LogoIcon';
+import { useT } from '@/i18n';
+import { call, isReady } from '@/services/rpc';
+import type { CheckItem, CheckStatus, StartupChecks } from '@/types';
 
 interface LoaderScreenProps {
   onComplete: (checks: StartupChecks) => void;
 }
 
-export const LoaderScreen: React.FC<LoaderScreenProps> = ({ onComplete }) => {
-  const [checks, setChecks] = useState<CheckItem[]>([
-    { label: 'USB Driver Permissions',  status: 'pending', detail: '' },
-    { label: 'Native Preview Engine',   status: 'pending', detail: '' },
-    { label: 'OBS Studio',              status: 'pending', detail: '' },
-    { label: 'OBS Mirror Plugin',        status: 'pending', detail: '' },
-  ]);
-  const [allDone, setAllDone] = useState(false);
+/** Index of each check, so the update calls below read as something. */
+const DRIVER = 0;
+const PLAYER = 1;
+const OBS = 2;
+const PLUGIN = 3;
+
+const INITIAL_CHECKS: CheckItem[] = [
+  { labelKey: 'loader.check.driver', status: 'pending', detail: '' },
+  { labelKey: 'loader.check.player', status: 'pending', detail: '' },
+  { labelKey: 'loader.check.obs', status: 'pending', detail: '' },
+  { labelKey: 'loader.check.plugin', status: 'pending', detail: '' },
+];
+
+const FAILED_CHECKS: StartupChecks = {
+  driverOk: false,
+  ffplayOk: false,
+  obsInstalled: false,
+  obsPluginInstalled: false,
+  obsPluginDir: '',
+};
+
+/** Paced so each result is legible rather than flashing past. */
+const STEP_DELAY_MS = 300;
+
+/** How often to look for the RPC bridge before the first check can run. */
+const BRIDGE_POLL_MS = 200;
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits for Electrobun to install the RPC bridge, or gives up. */
+async function waitForBridge(timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isReady()) return true;
+    await delay(BRIDGE_POLL_MS);
+  }
+  return false;
+}
+
+const STATUS_ICON: Record<CheckStatus, JSX.Element> = {
+  pending: <div className="h-4 w-4 rounded-full border-2 border-gray-700" />,
+  checking: (
+    <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
+  ),
+  ok: (
+    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-green-500 text-[8px] font-black text-black">
+      ✓
+    </div>
+  ),
+  warn: (
+    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-yellow-500/80 text-[8px] font-black text-black">
+      !
+    </div>
+  ),
+  error: (
+    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[8px] font-black text-white">
+      ✕
+    </div>
+  ),
+};
+
+const STATUS_COLOUR: Record<CheckStatus, string> = {
+  pending: 'text-gray-600',
+  checking: 'text-orange-400',
+  ok: 'text-green-400',
+  warn: 'text-yellow-400',
+  error: 'text-red-400',
+};
+
+/** Startup screen: reports what the app found, and offers to fix what it can. */
+export function LoaderScreen({ onComplete }: LoaderScreenProps) {
+  const t = useT();
+  const [checks, setChecks] = useState<CheckItem[]>(INITIAL_CHECKS);
   const [startupData, setStartupData] = useState<StartupChecks | null>(null);
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  const getRpc = useCallback(() => {
-    // @ts-ignore
-    return window.__mirrorRpc || (window.Electrobun && window.Electrobun.rpc);
-  }, []);
-
-  const updateCheck = (index: number, status: CheckStatus, detail: string) => {
-    setChecks(prev => prev.map((c, i) => i === index ? { ...c, status, detail } : c));
-  };
+  const update = (index: number, status: CheckStatus, detail: string) =>
+    setChecks((prev) => prev.map((c, i) => (i === index ? { ...c, status, detail } : c)));
 
   useEffect(() => {
     let cancelled = false;
 
-    const runChecks = async () => {
-      // Delay slightly for the animation to show
-      await new Promise(r => setTimeout(r, 600));
-
-      const rpc = getRpc();
-      if (!rpc) {
-        // RPC not ready, retry after delay
-        setTimeout(runChecks, 500);
+    const run = async () => {
+      if (!(await waitForBridge()) || cancelled) {
+        if (!cancelled) {
+          INITIAL_CHECKS.forEach((_, i) => update(i, 'warn', t('loader.check.failed')));
+          setStartupData(FAILED_CHECKS);
+          setProgress(100);
+        }
         return;
       }
 
       try {
-        // Check 1: USB Drivers
-        updateCheck(0, 'checking', 'Scanning USB subsystem...');
-        await new Promise(r => setTimeout(r, 400));
-
-        const data = await rpc.request('getStartupChecks') as StartupChecks;
+        update(DRIVER, 'checking', t('loader.check.driver.scanning'));
+        const data = await call('getStartupChecks');
         if (cancelled) return;
 
         setProgress(25);
-        updateCheck(0, data.driverOk ? 'ok' : 'warn',
-          data.driverOk ? 'Permissions configured' : 'Needs setup — click Fix below');
+        update(
+          DRIVER,
+          data.driverOk ? 'ok' : 'warn',
+          data.driverOk ? t('loader.check.driver.ok') : t('loader.check.driver.warn'),
+        );
 
-        // Check 2: Preview Engine
-        await new Promise(r => setTimeout(r, 300));
+        await delay(STEP_DELAY_MS);
         if (cancelled) return;
-
-        updateCheck(1, 'checking', 'Initializing rendering engine...');
-        await new Promise(r => setTimeout(r, 300));
         setProgress(50);
-        updateCheck(1, data.ffplayOk ? 'ok' : 'warn',
-          data.ffplayOk ? 'Built-in MiniFB engine ready' : 'Preview engine failed to load');
+        update(
+          PLAYER,
+          data.ffplayOk ? 'ok' : 'warn',
+          data.ffplayOk ? t('loader.check.player.ok') : t('loader.check.player.warn'),
+        );
 
-        // Check 3: OBS
-        await new Promise(r => setTimeout(r, 300));
+        await delay(STEP_DELAY_MS);
         if (cancelled) return;
-
-        updateCheck(2, 'checking', 'Detecting OBS Studio installation...');
-        await new Promise(r => setTimeout(r, 400));
         setProgress(75);
-        updateCheck(2, data.obsInstalled ? 'ok' : 'warn',
-          data.obsInstalled ? 'Installed' : 'Not detected — OBS integration unavailable');
+        update(
+          OBS,
+          data.obsInstalled ? 'ok' : 'warn',
+          data.obsInstalled ? t('loader.check.obs.ok') : t('loader.check.obs.warn'),
+        );
 
-        // Check 4: Plugin
-        await new Promise(r => setTimeout(r, 300));
+        await delay(STEP_DELAY_MS);
         if (cancelled) return;
-
-        updateCheck(3, 'checking', 'Checking for mirror-source plugin...');
-        await new Promise(r => setTimeout(r, 300));
         setProgress(100);
-
         if (!data.obsInstalled) {
-          updateCheck(3, 'warn', 'Skipped — OBS not installed');
+          update(PLUGIN, 'warn', t('loader.check.plugin.skipped'));
         } else {
-          updateCheck(3, data.obsPluginInstalled ? 'ok' : 'warn',
+          update(
+            PLUGIN,
+            data.obsPluginInstalled ? 'ok' : 'warn',
             data.obsPluginInstalled
-              ? `Installed at ${data.obsPluginDir}`
-              : 'Not installed — click Install below');
+              ? t('loader.check.plugin.ok', { path: data.obsPluginDir })
+              : t('loader.check.plugin.warn'),
+          );
         }
 
         setStartupData(data);
-        setAllDone(true);
-
-      } catch (e) {
-        console.error('Startup checks failed:', e);
-        // Mark all as warn and continue
-        for (let i = 0; i < 4; i++) {
-          updateCheck(i, 'warn', 'Check failed — continuing');
-        }
-        setStartupData({ driverOk: false, ffplayOk: false, obsInstalled: false, obsPluginInstalled: false, obsPluginDir: '' });
-        setAllDone(true);
+      } catch (error) {
+        console.error('Startup checks failed', error);
+        if (cancelled) return;
+        INITIAL_CHECKS.forEach((_, i) => update(i, 'warn', t('loader.check.failed')));
+        setStartupData(FAILED_CHECKS);
         setProgress(100);
       }
     };
 
-    runChecks();
-    return () => { cancelled = true; };
-  }, [getRpc]);
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // `t` is stable for a given locale, and re-running the checks on a language
+    // change would restart the whole startup sequence.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-   const installPlugin = async () => {
-     setInstalling(true);
-     try {
-       const rpc = getRpc();
-       if (rpc) {
-         const res = await rpc.request('installObsPlugin') as { success: boolean; error?: string };
-         if (res.success) {
-           updateCheck(3, 'ok', 'Plugin installed — restart OBS to activate');
-           if (startupData) setStartupData({ ...startupData, obsPluginInstalled: true });
-         } else {
-           const errorMsg = res.error || 'Unknown error occurred during installation';
-           updateCheck(3, 'error', `Installation failed: ${errorMsg}`);
-         }
-       }
-     } catch (e: any) {
-       const errorMessage = e.message || String(e) || 'Unknown error';
-       updateCheck(3, 'error', `Installation error: ${errorMessage}`);
-     } finally {
-       setInstalling(false);
-     }
-   };
-
-  const getStatusIcon = (s: CheckStatus) => {
-    switch (s) {
-      case 'pending': return <div className="w-4 h-4 rounded-full border-2 border-gray-700" />;
-      case 'checking': return <div className="w-4 h-4 rounded-full border-2 border-orange-400 border-t-transparent animate-spin" />;
-      case 'ok': return <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-[8px] text-black font-black">✓</div>;
-      case 'warn': return <div className="w-4 h-4 rounded-full bg-yellow-500/80 flex items-center justify-center text-[8px] text-black font-black">!</div>;
-      case 'error': return <div className="w-4 h-4 rounded-full bg-red-500 flex items-center justify-center text-[8px] text-white font-black">✕</div>;
+  const installPlugin = async () => {
+    setInstalling(true);
+    try {
+      const result = await call('installObsPlugin');
+      if (result.success) {
+        update(PLUGIN, 'ok', t('loader.check.plugin.installed'));
+        setStartupData((prev) => (prev ? { ...prev, obsPluginInstalled: true } : prev));
+      } else {
+        update(
+          PLUGIN,
+          'error',
+          t('loader.check.plugin.failed', { error: result.error ?? '' }),
+        );
+      }
+    } catch (error) {
+      update(
+        PLUGIN,
+        'error',
+        t('loader.check.plugin.failed', { error: String(error) }),
+      );
+    } finally {
+      setInstalling(false);
     }
   };
 
-  const getStatusColor = (s: CheckStatus) => {
-    switch (s) {
-      case 'pending': return 'text-gray-600';
-      case 'checking': return 'text-orange-400';
-      case 'ok': return 'text-green-400';
-      case 'warn': return 'text-yellow-400';
-      case 'error': return 'text-red-400';
-    }
-  };
+  const done = startupData !== null;
+  const canInstallPlugin =
+    checks[PLUGIN].status === 'warn' &&
+    startupData?.obsInstalled === true &&
+    startupData?.obsPluginInstalled === false;
 
   return (
-    <div className="min-h-screen bg-[#050608] flex items-center justify-center p-6">
+    <div className="flex min-h-screen items-center justify-center bg-[#050608] p-6">
       <div className="w-full max-w-lg">
-        {/* Logo & Title */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center mb-6">
+        <div className="mb-10 text-center">
+          <div className="mb-6 inline-flex items-center justify-center">
             <div className="relative">
-              <div className="absolute inset-0 blur-2xl bg-orange-500/20 rounded-full animate-pulse" />
+              <div className="absolute inset-0 animate-pulse rounded-full bg-orange-500/20 blur-2xl" />
               <LogoIcon />
             </div>
           </div>
-          <h1 className="text-3xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 uppercase mb-2">
-            Mirror Core
+          <h1 className="mb-2 bg-gradient-to-r from-orange-400 to-orange-600 bg-clip-text text-3xl font-black uppercase tracking-tighter text-transparent">
+            {t('app.title')}
           </h1>
-          <p className="text-[10px] text-gray-500 font-mono tracking-[0.4em] uppercase">
-            Initializing Enterprise Platform
+          <p className="font-mono text-[10px] uppercase tracking-[0.4em] text-gray-500">
+            {t('loader.initializing')}
           </p>
         </div>
 
-        {/* Progress Bar */}
         <div className="mb-8 px-4">
-          <div className="h-[2px] bg-gray-800 rounded-full overflow-hidden">
+          <div className="h-[2px] overflow-hidden rounded-full bg-gray-800">
             <div
-              className="h-full bg-gradient-to-r from-orange-500 to-orange-400 rounded-full transition-all duration-700 ease-out"
+              className="h-full rounded-full bg-gradient-to-r from-orange-500 to-orange-400 transition-all duration-700 ease-out"
               style={{ width: `${progress}%` }}
             />
           </div>
         </div>
 
-        {/* Check Items */}
-        <div className="bg-[#0a0c10] rounded-2xl border border-gray-800/50 p-6 space-y-1 mb-6 shadow-2xl">
+        <div className="mb-6 space-y-1 rounded-2xl border border-gray-800/50 bg-[#0a0c10] p-6 shadow-2xl">
           {checks.map((check, i) => (
-            <div key={i} className={`flex items-start gap-4 py-3 px-3 rounded-xl transition-all duration-300 ${check.status === 'checking' ? 'bg-orange-500/5' : ''}`}>
-              <div className="mt-0.5 flex-shrink-0">
-                {getStatusIcon(check.status)}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className={`text-xs font-bold ${check.status === 'pending' ? 'text-gray-600' : 'text-gray-200'} transition-colors duration-300`}>
-                  {check.label}
+            <div
+              key={check.labelKey}
+              className={`flex items-start gap-4 rounded-xl px-3 py-3 transition-all duration-300 ${
+                check.status === 'checking' ? 'bg-orange-500/5' : ''
+              }`}
+            >
+              <div className="mt-0.5 flex-shrink-0">{STATUS_ICON[check.status]}</div>
+              <div className="min-w-0 flex-1">
+                <div
+                  className={`text-xs font-bold transition-colors duration-300 ${
+                    check.status === 'pending' ? 'text-gray-600' : 'text-gray-200'
+                  }`}
+                >
+                  {t(check.labelKey)}
                 </div>
                 {check.detail && (
-                  <div className={`text-[10px] mt-0.5 ${getStatusColor(check.status)} font-medium truncate`}>
+                  <div
+                    className={`mt-0.5 truncate text-[10px] font-medium ${STATUS_COLOUR[check.status]}`}
+                  >
                     {check.detail}
                   </div>
                 )}
               </div>
-              {/* Install button for OBS plugin */}
-              {i === 3 && check.status === 'warn' && startupData?.obsInstalled && !startupData?.obsPluginInstalled && (
+
+              {i === PLUGIN && canInstallPlugin && (
                 <button
+                  type="button"
                   onClick={installPlugin}
                   disabled={installing}
-                  className="text-[9px] font-black uppercase px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer flex-shrink-0"
+                  className="flex-shrink-0 cursor-pointer rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[9px] font-black uppercase text-blue-400 transition-all hover:bg-blue-500/20"
                 >
-                  {installing ? 'Installing...' : 'Install'}
+                  {installing ? t('loader.installing') : t('loader.install')}
                 </button>
               )}
             </div>
           ))}
         </div>
 
-        {/* Enter Button */}
         <div className="flex justify-center">
           <button
+            type="button"
             onClick={() => startupData && onComplete(startupData)}
-            disabled={!allDone}
-            className={`px-12 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all duration-500 cursor-pointer ${
-              allDone
-                ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-black shadow-xl shadow-orange-900/30 hover:shadow-orange-600/40 hover:scale-[1.02] active:scale-[0.98]'
-                : 'bg-gray-800 text-gray-600 cursor-not-allowed'
+            disabled={!done}
+            className={`cursor-pointer rounded-xl px-12 py-3 text-xs font-black uppercase tracking-widest transition-all duration-500 ${
+              done
+                ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-black shadow-xl shadow-orange-900/30 hover:scale-[1.02] hover:shadow-orange-600/40 active:scale-[0.98]'
+                : 'cursor-not-allowed bg-gray-800 text-gray-600'
             }`}
           >
-            {allDone ? 'Enter Dashboard' : 'System Check in Progress...'}
+            {done ? t('loader.enter') : t('loader.waiting')}
           </button>
         </div>
 
-        {/* Version footer */}
-        <p className="text-center text-[9px] text-gray-700 mt-8 tracking-widest uppercase">
-          v1.0 Enterprise • USB AV Pipeline
+        <p className="mt-8 text-center text-[9px] uppercase tracking-widest text-gray-700">
+          {t('app.version')}
         </p>
       </div>
     </div>
   );
-};
+}

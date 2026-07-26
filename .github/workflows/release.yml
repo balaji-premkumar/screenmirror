@@ -1,20 +1,32 @@
-name: Release Application
+name: Release
 
 on:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
+  # Nothing is published from a tag that does not pass the ordinary checks.
+  checks:
+    uses: ./.github/workflows/check.yml
+
   mobile:
+    needs: checks
     uses: ./.github/workflows/mobile.yml
+
   desktop:
+    needs: checks
     uses: ./.github/workflows/desktop.yml
+
   obs_plugin:
+    needs: checks
     uses: ./.github/workflows/obs_plugin.yml
 
   create_release:
-    name: Create Release
+    name: Create the release
     runs-on: ubuntu-latest
     needs: [mobile, desktop, obs_plugin]
     steps:
@@ -22,17 +34,19 @@ jobs:
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Publish
+        uses: softprops/action-gh-release@v2
         with:
           files: |
-            mirror-companion-apk/*.apk
-            mirror-desktop-ubuntu-latest/**/*
-            mirror-desktop-windows-latest/**/*
-            mirror-desktop-macos-latest/**/*
-            obs-plugin-linux/*.so
+            artifacts/mirror-companion-apk/*.apk
+            artifacts/mirror-desktop-ubuntu-latest/**/*
+            artifacts/mirror-desktop-windows-latest/**/*
+            artifacts/mirror-desktop-macos-latest/**/*
+            artifacts/obs-plugin-linux/*.so
+          fail_on_unmatched_files: true
+          generate_release_notes: true
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

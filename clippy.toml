@@ -1,0 +1,8 @@
+# The decode and remux paths pass frame buffers around; the default
+# `too_many_arguments` and cognitive-complexity limits fire on the ffmpeg
+# interop code without pointing at anything worth changing.
+too-many-arguments-threshold = 9
+
+# Named after the crates they belong to, which reads better than the lint's
+# preferred shorter form.
+avoid-breaking-exported-api = true

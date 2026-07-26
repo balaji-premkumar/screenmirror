@@ -1,3 +1,10 @@
+# Deliberately its own workspace root rather than a member of the one at the
+# repository root. cargo-ndk cross-compiles this crate to Android, and a shared
+# workspace would pull `mirror_backend` — and through it ffmpeg-sys, which has
+# no Android target — into every mobile build. Path dependencies reach across
+# workspace boundaries fine, so the shared crates are still shared.
+[workspace]
+
 [package]
 name = "rust_lib_stream_mobile_app"
 version = "0.1.0"
@@ -7,6 +14,10 @@ edition = "2021"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
+# The wire format both ends of the link must agree on. Previously this file's
+# `muxer.rs` had its own copy of the magic bytes and type tags, with nothing
+# tying it to the desktop parser.
+mirror-protocol = { path = "../../packages/mirror-protocol" }
 flutter_rust_bridge = "=2.11.1"
 rusb = { version = "0.9", features = ["vendored"] }
 anyhow = "1.0"

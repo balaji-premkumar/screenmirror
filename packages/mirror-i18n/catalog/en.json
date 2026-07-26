@@ -1,0 +1,525 @@
+{
+  "locale": "en",
+  "name": "English",
+  "entries": {
+    "aoa.handshake.requesting_version": {
+      "level": "INFO",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "Asking the device which accessory protocol version it supports…"
+    },
+    "aoa.handshake.attempt_failed": {
+      "level": "WARN",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "Handshake attempt {attempt} failed: {error}"
+    },
+    "aoa.handshake.refused": {
+      "level": "ERROR",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "The device refused accessory mode. It may be locked in file-transfer mode, or already connected as an accessory elsewhere."
+    },
+    "aoa.handshake.string_set": {
+      "level": "INFO",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "Identification string {index} accepted: \"{value}\""
+    },
+    "aoa.handshake.string_failed": {
+      "level": "ERROR",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "Identification string {index} was rejected: {error}"
+    },
+    "aoa.handshake.switching": {
+      "level": "SUCCESS",
+      "component": "AOA",
+      "action": "handshake",
+      "message": "Switching the device to accessory mode…"
+    },
+
+    "usb.streaming.session_reset": {
+      "level": "WARN",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Previous session released — link state reset."
+    },
+    "usb.streaming.thread_started": {
+      "level": "INFO",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Starting the USB session…"
+    },
+    "usb.streaming.open_failed": {
+      "level": "ERROR",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Could not open the device: {error}. Connection abandoned."
+    },
+    "usb.streaming.claim_failed": {
+      "level": "ERROR",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Could not claim the interface: {error}. Another program may be using the device."
+    },
+    "usb.streaming.link_established": {
+      "level": "SUCCESS",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Connected to the phone. Interface 0 claimed."
+    },
+    "usb.streaming.default_endpoint": {
+      "level": "WARN",
+      "component": "USB",
+      "action": "streaming",
+      "message": "The device advertised no OUT endpoint; falling back to the protocol default 0x02."
+    },
+    "usb.streaming.thread_stopping": {
+      "level": "INFO",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Streaming loop is shutting down."
+    },
+    "usb.streaming.user_disconnect": {
+      "level": "WARN",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Disconnected at your request."
+    },
+    "usb.streaming.config_sending": {
+      "level": "INFO",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Sending settings to the phone ({bytes} bytes)…"
+    },
+    "usb.streaming.config_sent": {
+      "level": "SUCCESS",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Settings sent ({bytes} bytes)."
+    },
+    "usb.streaming.config_failed": {
+      "level": "ERROR",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Could not send settings to the phone: {error}"
+    },
+    "usb.streaming.inactivity_timeout": {
+      "level": "ERROR",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Nothing received for a while — the phone appears to have disconnected."
+    },
+    "usb.streaming.read_failed": {
+      "level": "ERROR",
+      "component": "USB",
+      "action": "streaming",
+      "message": "Unrecoverable read error: {error}. Closing the link."
+    },
+    "usb.streaming.thread_ended": {
+      "level": "INFO",
+      "component": "USB",
+      "action": "streaming",
+      "message": "USB session ended."
+    },
+
+    "ffi.handshake.requested": {
+      "level": "INFO",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "Starting handshake with {vid}:{pid}…"
+    },
+    "ffi.handshake.context_failed": {
+      "level": "ERROR",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "Could not create a USB context: {error}"
+    },
+    "ffi.handshake.already_accessory": {
+      "level": "INFO",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "The device is already in accessory mode — connecting directly."
+    },
+    "ffi.handshake.failed": {
+      "level": "ERROR",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "Handshake failed: {error}"
+    },
+    "ffi.handshake.switching": {
+      "level": "SUCCESS",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "Switching to accessory mode…"
+    },
+    "ffi.handshake.open_failed": {
+      "level": "ERROR",
+      "component": "FFI",
+      "action": "handshake",
+      "message": "Could not open the device: {error}"
+    },
+
+    "reenum.accessory_found": {
+      "level": "SUCCESS",
+      "component": "RE-ENUM",
+      "action": "handshake",
+      "message": "The device reappeared as an accessory."
+    },
+    "reenum.timeout": {
+      "level": "ERROR",
+      "component": "RE-ENUM",
+      "action": "handshake",
+      "message": "The device did not reappear in time. Try unplugging and replugging the cable."
+    },
+
+    "demux.resync.discarded": {
+      "level": "WARN",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "Skipped {bytes} bytes to resynchronise with the stream."
+    },
+    "demux.frame.unknown_type": {
+      "level": "WARN",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "Unknown frame type {type} — skipping."
+    },
+    "demux.frame.oversized": {
+      "level": "ERROR",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "A frame claimed {bytes} bytes, which is over the limit. Treating it as corrupt."
+    },
+    "demux.frame.first": {
+      "level": "SUCCESS",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "First {kind} frame received ({bytes} bytes)."
+    },
+    "demux.progress": {
+      "level": "INFO",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "{frames} frames received — {video} video, {audio} audio, {discarded} bytes discarded."
+    },
+    "demux.buffer.overflow": {
+      "level": "ERROR",
+      "component": "DEMUX",
+      "action": "pipeline",
+      "message": "Buffered {bytes} bytes without finding a valid frame — clearing and resynchronising."
+    },
+
+    "decoder.init.hardware": {
+      "level": "SUCCESS",
+      "component": "DECODER",
+      "action": "init",
+      "message": "Using hardware decoding via {device}."
+    },
+    "decoder.init.software": {
+      "level": "INFO",
+      "component": "DECODER",
+      "action": "init",
+      "message": "No hardware decoder available — using multithreaded software HEVC."
+    },
+    "decoder.thread_started": {
+      "level": "INFO",
+      "component": "DECODER",
+      "action": "decoder",
+      "message": "Decoder started."
+    },
+    "decoder.init.failed": {
+      "level": "FATAL",
+      "component": "DECODER",
+      "action": "init",
+      "message": "The decoder could not be created: {error}"
+    },
+    "decoder.thread_stopping": {
+      "level": "INFO",
+      "component": "DECODER",
+      "action": "decoder",
+      "message": "Decoder is shutting down."
+    },
+    "decoder.decode_failed": {
+      "level": "ERROR",
+      "component": "DECODER",
+      "action": "pipeline",
+      "message": "Could not decode a frame: {error}"
+    },
+    "decoder.hardware_fallback": {
+      "level": "WARN",
+      "component": "DECODER",
+      "action": "pipeline",
+      "message": "Hardware decoding keeps failing — switching to software."
+    },
+
+    "player.waiting_for_keyframe": {
+      "level": "INFO",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Preparing playback — waiting for a keyframe and the frame size…"
+    },
+    "player.keyframe_timeout": {
+      "level": "ERROR",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "No keyframe arrived in time. Is the phone actually streaming?"
+    },
+    "player.spawn_failed": {
+      "level": "ERROR",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Could not start the player: {error}"
+    },
+    "player.stdin_unavailable": {
+      "level": "ERROR",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "The player started but would not accept a stream."
+    },
+    "player.muxer_failed": {
+      "level": "ERROR",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Could not prepare the stream for playback: {error}"
+    },
+    "player.playing": {
+      "level": "SUCCESS",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Playing {width}×{height} — video and audio are in the player window."
+    },
+    "player.window_closed": {
+      "level": "INFO",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Player window closed."
+    },
+    "player.exited": {
+      "level": "INFO",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "The player has exited."
+    },
+    "player.mux_error": {
+      "level": "ERROR",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Playback stream error: {error}"
+    },
+    "player.session_ended": {
+      "level": "INFO",
+      "component": "PLAYER",
+      "action": "ffplay",
+      "message": "Playback stopped."
+    },
+
+    "obs.feed.toggled": {
+      "level": "INFO",
+      "component": "OBS",
+      "action": "feed",
+      "message": "OBS feed {state}."
+    },
+    "obs.shmem.audio_open_failed": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "shmem",
+      "message": "Could not open the shared audio buffer for OBS."
+    },
+    "obs.shmem.audio_ready": {
+      "level": "SUCCESS",
+      "component": "OBS",
+      "action": "shmem",
+      "message": "Shared audio buffer for OBS is ready."
+    },
+    "obs.shmem.audio_map_failed": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "shmem",
+      "message": "Could not map the shared audio buffer for OBS."
+    },
+    "obs.shmem.unsupported": {
+      "level": "WARN",
+      "component": "OBS",
+      "action": "shmem",
+      "message": "The OBS feed is not supported on this operating system."
+    },
+    "obs.shmem.audio_released": {
+      "level": "INFO",
+      "component": "OBS",
+      "action": "shmem",
+      "message": "Shared audio buffer for OBS released."
+    },
+    "obs.install.started": {
+      "level": "INFO",
+      "component": "OBS",
+      "action": "install",
+      "message": "Installing the OBS plugin (version {version})…"
+    },
+    "obs.install.dir_not_found": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "install",
+      "message": "Could not find where OBS keeps its plugins on this system."
+    },
+    "obs.install.compiling": {
+      "level": "INFO",
+      "component": "OBS",
+      "action": "install",
+      "message": "No prebuilt plugin was bundled — compiling one now…"
+    },
+    "obs.install.compile_failed": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "install",
+      "message": "Compiling the plugin failed. Install the OBS development headers (libobs-dev) and try again."
+    },
+    "obs.install.binary_missing": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "install",
+      "message": "No plugin binary is available. On Windows, mirror-source.dll must be bundled in bin/ — build it with obs_plugin/CMakeLists.txt."
+    },
+    "obs.install.mkdir_failed": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "install",
+      "message": "Could not create the plugin folder."
+    },
+    "obs.install.copying": {
+      "level": "INFO",
+      "component": "OBS",
+      "action": "install",
+      "message": "Copying the plugin from {from} to {to}…"
+    },
+    "obs.install.copy_failed": {
+      "level": "ERROR",
+      "component": "OBS",
+      "action": "install",
+      "message": "Could not copy the plugin: {error}"
+    },
+    "obs.install.version_write_failed": {
+      "level": "WARN",
+      "component": "OBS",
+      "action": "install",
+      "message": "Could not write the version marker to {path}: {error}"
+    },
+    "obs.install.complete": {
+      "level": "SUCCESS",
+      "component": "OBS",
+      "action": "install",
+      "message": "Plugin version {version} installed to {path}."
+    },
+
+    "driver.setup.requesting_elevation": {
+      "level": "INFO",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "Asking for permission to install the USB access rule…"
+    },
+    "driver.setup.pkexec_launch_failed": {
+      "level": "ERROR",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "Could not start the authorisation prompt: {error}"
+    },
+    "driver.setup.udev_installed": {
+      "level": "SUCCESS",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "USB access rule installed. Unplug and replug the device to activate it."
+    },
+    "driver.setup.udev_failed": {
+      "level": "ERROR",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "The USB access rule was not installed — the prompt was dismissed or the command failed."
+    },
+    "driver.setup.winusb_present": {
+      "level": "INFO",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "The USB driver is already set up — nothing to install."
+    },
+    "driver.setup.libwdi_installing": {
+      "level": "INFO",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "Installing the USB driver (one permission prompt will appear)…"
+    },
+    "driver.setup.libwdi_finished": {
+      "level": "SUCCESS",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "USB driver installation finished."
+    },
+    "driver.setup.libwdi_failed": {
+      "level": "ERROR",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "USB driver installation failed or was cancelled at the prompt."
+    },
+    "driver.setup.pnputil_installing": {
+      "level": "INFO",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "Installing the USB driver package (one permission prompt will appear)…"
+    },
+    "driver.setup.pnputil_installed": {
+      "level": "SUCCESS",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "USB driver package installed. Replug the cable to activate it."
+    },
+    "driver.setup.pnputil_unsigned": {
+      "level": "ERROR",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "Windows rejected the driver package because it is unsigned. Bundle bin\\wdi-simple.exe for automatic installation, or install the driver once with Zadig."
+    },
+    "driver.setup.pnputil_failed": {
+      "level": "ERROR",
+      "component": "DRIVER",
+      "action": "setup",
+      "message": "USB driver installation was cancelled or failed."
+    },
+
+    "system.init.shared_memory_failed": {
+      "level": "ERROR",
+      "component": "SYSTEM",
+      "action": "init",
+      "message": "Could not set up shared memory: {error}"
+    },
+    "system.shutdown.complete": {
+      "level": "SUCCESS",
+      "component": "SYSTEM",
+      "action": "shutdown",
+      "message": "Session stopped and everything cleaned up."
+    },
+    "system.discovery.context_failed": {
+      "level": "ERROR",
+      "component": "SYSTEM",
+      "action": "discovery",
+      "message": "Could not access the USB subsystem: {error}"
+    },
+    "system.discovery.started": {
+      "level": "INFO",
+      "component": "SYSTEM",
+      "action": "discovery",
+      "message": "Watching for devices…"
+    },
+    "system.discovery.stopping": {
+      "level": "INFO",
+      "component": "SYSTEM",
+      "action": "discovery",
+      "message": "Device scanning is shutting down."
+    },
+    "system.discovery.poll_failed": {
+      "level": "WARN",
+      "component": "SYSTEM",
+      "action": "discovery",
+      "message": "A device scan failed: {error}"
+    }
+  }
+}

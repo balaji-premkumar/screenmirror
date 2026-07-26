@@ -6,36 +6,40 @@ on:
 
 jobs:
   build_linux:
-    name: Build Plugin (Linux)
+    name: Plugin (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      # `librt-dev` does not exist as a package — librt is part of glibc and is
+      # linked by name in CMakeLists.txt. Asking for it made this step fail on
+      # a fresh runner image.
+      - name: Install libobs
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libobs-dev librt-dev
+          sudo apt-get install -y build-essential cmake libobs-dev
 
-      - name: Build Plugin
+      - name: Build
+        working-directory: desktopApp
         run: |
-          mkdir -p build
-          gcc -shared -fPIC -o build/mirror-source.so mirror_source.c -I/usr/include/obs -lobs -lrt
-        working-directory: desktopApp/obs_plugin
+          cmake -S obs_plugin -B obs_plugin/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build obs_plugin/build --config Release
 
-      - name: Upload Linux Plugin
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: obs-plugin-linux
           path: desktopApp/obs_plugin/build/mirror-source.so
+          if-no-files-found: error
 
-  build_windows:
-    name: Build Plugin (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build Plugin
-        run: |
-          # Note: This requires OBS headers and libobs.lib. 
-          # In a real environment, you'd download the OBS SDK.
-          echo "Windows OBS Plugin build requires OBS SDK"
+# Windows and macOS are not built here. libobs has no packaged development
+# form on either — the SDK has to be built from source or extracted from an OBS
+# release — and a job that downloads a multi-hundred-megabyte SDK to compile
+# one 500-line file is not worth the runtime.
+#
+# What that would have caught is covered elsewhere: the plugin and the backend
+# agreeing about the bytes they share is asserted by
+# `sinks::obs_feed::layout::the_audio_header_matches_the_plugin`, which parses
+# the C struct out of mirror_source.c and compares it against the Rust
+# constants. That runs on every platform in the Checks workflow, and it is the
+# failure that actually matters: a drift there does not crash, it makes OBS
+# render silence.
