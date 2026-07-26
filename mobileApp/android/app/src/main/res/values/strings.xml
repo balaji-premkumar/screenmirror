@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  User-visible Android text.
+
+  Only strings the *system* renders belong here: the launcher label, the
+  notification, and the notification channel. Everything inside the app is
+  drawn by Flutter and lives in `lib/src/l10n/app_en.arb` instead.
+
+  To add a language, copy this file to `res/values-<code>/strings.xml` and
+  translate it. Android picks the closest match to the phone's language on its
+  own; no code change is needed.
+
+  Log messages are deliberately not here. They go to logcat, are read by
+  whoever is debugging, and are quoted verbatim in bug reports — translating
+  them would make a pasted log harder to search, not easier to read.
+-->
+<resources>
+    <string name="app_name">Mirror</string>
+
+    <!-- Shown while the screen is being captured. It cannot be dismissed, so
+         the Stop action below is the user's only way out without reopening
+         the app. -->
+    <string name="notification_title">Screen mirroring is on</string>
+    <string name="notification_text">Your screen is being sent to a computer over USB.</string>
+    <string name="notification_text_expanded">Your screen and audio are being sent to a computer over USB. Tap Stop to end the session.</string>
+    <string name="notification_action_stop">Stop</string>
+
+    <!-- Appears in the system notification settings, where the user decides
+         whether to allow this notification at all. Android 13+ hides the
+         notification without permission, taking the Stop action with it. -->
+    <string name="notification_channel_name">Screen mirroring</string>
+    <string name="notification_channel_description">Shows while your screen is being sent to a computer.</string>
+</resources>

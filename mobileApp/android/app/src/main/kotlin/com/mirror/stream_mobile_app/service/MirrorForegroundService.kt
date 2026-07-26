@@ -1,6 +1,8 @@
 package com.mirror.stream_mobile_app.service
 
 import android.app.*
+// R is generated into the app's namespace, not this subpackage.
+import com.mirror.stream_mobile_app.R
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -95,11 +97,11 @@ class MirrorForegroundService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("⚠️ Screen Mirroring Active")
-            .setContentText("Your screen is being streamed to PC via USB")
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(getString(R.string.notification_text))
             .setStyle(
                 NotificationCompat.BigTextStyle()
-                    .bigText("Your screen and audio are being streamed to PC via USB. Tap 'Stop' to end the session.")
+                    .bigText(getString(R.string.notification_text_expanded))
             )
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setColor(0xFFFF5722.toInt())
@@ -107,7 +109,11 @@ class MirrorForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(android.R.drawable.ic_media_pause, "Stop Mirroring", stopPendingIntent)
+            .addAction(
+                android.R.drawable.ic_media_pause,
+                getString(R.string.notification_action_stop),
+                stopPendingIntent
+            )
             .build()
 
         if (!enterForeground(notification)) {
@@ -532,9 +538,11 @@ class MirrorForegroundService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
-                CHANNEL_ID, "Screen Mirroring", NotificationManager.IMPORTANCE_HIGH
+                CHANNEL_ID,
+                getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Shows when your screen is being mirrored to a PC"
+                description = getString(R.string.notification_channel_description)
                 lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(serviceChannel)
