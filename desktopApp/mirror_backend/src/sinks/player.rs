@@ -22,9 +22,10 @@
 //!   2. the frame size, reported by the decoder through `note_dimensions()`
 //!      (Matroska needs PixelWidth/PixelHeight in the track header).
 
+use crate::log_event;
 use crate::pipeline::scan_packet;
-use crate::receiver::log_event;
 use ffmpeg_next as ffmpeg;
+use mirror_i18n::codes;
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -59,48 +60,13 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 /// them `avformat_write_header` fails with AVERROR_INVALIDDATA.
 static CSD: Lazy<Mutex<Vec<u8>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-/// Pull the VPS/SPS/PPS NAL units out of an Annex-B packet, re-emitted with
-/// 4-byte start codes. FFmpeg's hvcC writer accepts Annex-B extradata.
-fn extract_parameter_sets(data: &[u8]) -> Vec<u8> {
-    fn is_start(d: &[u8], i: usize) -> bool {
-        i + 2 < d.len()
-            && d[i] == 0
-            && d[i + 1] == 0
-            && (d[i + 2] == 1 || (d[i + 2] == 0 && i + 3 < d.len() && d[i + 3] == 1))
-    }
-
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + 3 < data.len() {
-        if !is_start(data, i) {
-            i += 1;
-            continue;
-        }
-        let nal_start = if data[i + 2] == 1 { i + 3 } else { i + 4 };
-        if nal_start >= data.len() {
-            break;
-        }
-        let nal_type = (data[nal_start] >> 1) & 0x3F;
-
-        let mut j = nal_start;
-        let end = loop {
-            if j + 2 >= data.len() {
-                break data.len();
-            }
-            if is_start(data, j) {
-                break j;
-            }
-            j += 1;
-        };
-
-        if (32..=34).contains(&nal_type) {
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(&data[nal_start..end]);
-        }
-        i = end.max(nal_start + 1);
-    }
-    out
-}
+/// Pulls the VPS/SPS/PPS NAL units out of an Annex-B packet, re-emitted with
+/// 4-byte start codes. FFmpeg's `hvcC` writer accepts Annex-B extradata.
+///
+/// The walker itself lives in `mirror-protocol` alongside the frame format,
+/// because the mobile sender needs the same one to decide which packets it may
+/// drop under queue pressure.
+use mirror_protocol::hevc::extract_parameter_sets;
 
 /// True while a session wants packets (starting or playing). Checked on the
 /// USB thread, so it is a plain atomic rather than a lock.
@@ -178,10 +144,7 @@ impl Queue {
     }
 
     fn clear(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     fn wake(&self) {
@@ -202,7 +165,7 @@ pub fn push_video(data: &[u8]) {
     let info = scan_packet(data);
     if !ARMED.load(Ordering::Relaxed) {
         // Wait for a self-contained entry point.
-        if !(info.has_csd && info.has_keyframe) {
+        if !(info.has_parameter_sets && info.has_keyframe) {
             return;
         }
         let params = extract_parameter_sets(data);
@@ -365,13 +328,13 @@ impl Muxer {
         mux.audio_idx = (*a).index;
         (*a).time_base = AVRational {
             num: 1,
-            den: crate::audio::SOURCE_SAMPLE_RATE as libc::c_int,
+            den: crate::sinks::SOURCE_SAMPLE_RATE as libc::c_int,
         };
         let apar = (*a).codecpar;
         (*apar).codec_type = AVMediaType::AVMEDIA_TYPE_AUDIO;
         (*apar).codec_id = AVCodecID::AV_CODEC_ID_PCM_F32LE;
         (*apar).format = AVSampleFormat::AV_SAMPLE_FMT_FLT as libc::c_int;
-        (*apar).sample_rate = crate::audio::SOURCE_SAMPLE_RATE as libc::c_int;
+        (*apar).sample_rate = crate::sinks::SOURCE_SAMPLE_RATE as libc::c_int;
         (*apar).bits_per_coded_sample = 32;
         (*apar).block_align = 4;
         av_channel_layout_default(&mut (*apar).ch_layout, 1);
@@ -546,12 +509,7 @@ pub fn start(project_root: &str) -> i32 {
     let root = project_root.to_string();
     std::thread::spawn(move || run_session(root, my_gen));
 
-    log_event(
-        "INFO",
-        "PLAYER",
-        "ffplay",
-        "Playback requested — waiting for a keyframe and the frame size...",
-    );
+    log_event!(codes::PLAYER_WAITING_FOR_KEYFRAME);
     0
 }
 
@@ -583,12 +541,7 @@ fn run_session(project_root: String, my_gen: u64) {
             break;
         }
         if Instant::now() >= deadline {
-            log_event(
-                "ERROR",
-                "PLAYER",
-                "ffplay",
-                "Timed out waiting for a keyframe — is the phone streaming?",
-            );
+            log_event!(codes::PLAYER_KEYFRAME_TIMEOUT);
             finish(my_gen);
             return;
         }
@@ -602,13 +555,13 @@ fn run_session(project_root: String, my_gen: u64) {
     let mut child = match spawn_ffplay(&project_root) {
         Ok(c) => c,
         Err(e) => {
-            log_event("ERROR", "PLAYER", "ffplay", &e);
+            log_event!(codes::PLAYER_SPAWN_FAILED, "error" => e);
             finish(my_gen);
             return;
         }
     };
     let Some(stdin) = child.stdin.take() else {
-        log_event("ERROR", "PLAYER", "ffplay", "ffplay stdin pipe unavailable");
+        log_event!(codes::PLAYER_STDIN_UNAVAILABLE);
         let _ = child.kill();
         finish(my_gen);
         return;
@@ -618,7 +571,7 @@ fn run_session(project_root: String, my_gen: u64) {
     let mut muxer = match unsafe { Muxer::new(width, height, &extradata, stdin) } {
         Ok(m) => m,
         Err(e) => {
-            log_event("ERROR", "PLAYER", "ffplay", &format!("Muxer setup: {e}"));
+            log_event!(codes::PLAYER_MUXER_FAILED, "error" => e);
             let _ = child.kill();
             let _ = child.wait();
             finish(my_gen);
@@ -627,12 +580,7 @@ fn run_session(project_root: String, my_gen: u64) {
     };
 
     STATE.store(STATE_PLAYING, Ordering::Release);
-    log_event(
-        "SUCCESS",
-        "PLAYER",
-        "ffplay",
-        &format!("Playing {width}x{height} — video and audio are on ffplay"),
-    );
+    log_event!(codes::PLAYER_PLAYING, "width" => width, "height" => height);
 
     // ── Phase 3: pump ──
     // Video is stamped with arrival time; audio with its own sample count,
@@ -646,12 +594,12 @@ fn run_session(project_root: String, my_gen: u64) {
             break;
         }
         if muxer.pipe_broken() {
-            log_event("INFO", "PLAYER", "ffplay", "Player window closed.");
+            log_event!(codes::PLAYER_WINDOW_CLOSED);
             break;
         }
         match child.try_wait() {
             Ok(Some(_)) => {
-                log_event("INFO", "PLAYER", "ffplay", "Player exited.");
+                log_event!(codes::PLAYER_EXITED);
                 break;
             }
             Err(_) => break,
@@ -682,7 +630,7 @@ fn run_session(project_root: String, my_gen: u64) {
 
         if let Err(e) = res {
             if !muxer.pipe_broken() {
-                log_event("ERROR", "PLAYER", "ffplay", &format!("Mux error: {e}"));
+                log_event!(codes::PLAYER_MUX_ERROR, "error" => e);
             }
             break;
         }
@@ -691,7 +639,7 @@ fn run_session(project_root: String, my_gen: u64) {
     // ── Teardown: trailer + close pipe, then reap the child ──
     drop(muxer);
     let _ = child.wait();
-    log_event("INFO", "PLAYER", "ffplay", "Playback session ended.");
+    log_event!(codes::PLAYER_SESSION_ENDED);
     finish(my_gen);
 }
 
@@ -721,9 +669,24 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                0, 0, 0, 1, 32 << 1, 0xAA, // VPS, normalised to a 4-byte start code
-                0, 0, 0, 1, 33 << 1, 0xBB, // SPS
-                0, 0, 0, 1, 34 << 1, 0xCC, // PPS
+                0,
+                0,
+                0,
+                1,
+                32 << 1,
+                0xAA, // VPS, normalised to a 4-byte start code
+                0,
+                0,
+                0,
+                1,
+                33 << 1,
+                0xBB, // SPS
+                0,
+                0,
+                0,
+                1,
+                34 << 1,
+                0xCC, // PPS
             ]
         );
     }
@@ -780,12 +743,21 @@ mod tests {
 
         let ok = Command::new("ffmpeg")
             .args([
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30",
-                "-t", "1",
-                "-c:v", "libx265",
-                "-x265-params", "keyint=1:repeat-headers=1:log-level=none",
-                "-f", "hevc",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=30",
+                "-t",
+                "1",
+                "-c:v",
+                "libx265",
+                "-x265-params",
+                "keyint=1:repeat-headers=1:log-level=none",
+                "-f",
+                "hevc",
             ])
             .arg(&es_path)
             .status()
@@ -796,9 +768,19 @@ mod tests {
         }
         Command::new("ffmpeg")
             .args([
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                "-t", "1", "-f", "f32le", "-ac", "1",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "1",
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
             ])
             .arg(&pcm_path)
             .status()
@@ -827,7 +809,10 @@ mod tests {
         assert!(is_active(), "player should be accepting packets");
 
         // Nothing should be queued before an armed keyframe is seen.
-        assert!(needs_dimensions(), "should still be waiting for the frame size");
+        assert!(
+            needs_dimensions(),
+            "should still be waiting for the frame size"
+        );
 
         // The decoder reports the frame size in the live pipeline.
         note_dimensions(320, 240);
@@ -845,7 +830,11 @@ mod tests {
         }
 
         assert!(ARMED.load(Ordering::Acquire), "never armed on a keyframe");
-        assert_eq!(state(), STATE_PLAYING, "ffplay session did not reach PLAYING");
+        assert_eq!(
+            state(),
+            STATE_PLAYING,
+            "ffplay session did not reach PLAYING"
+        );
 
         stop();
         assert_eq!(state(), STATE_STOPPED);
@@ -872,12 +861,21 @@ mod tests {
         // All-IDR so every access unit carries its own parameter sets.
         let enc = Command::new("ffmpeg")
             .args([
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30",
-                "-t", "0.5",
-                "-c:v", "libx265",
-                "-x265-params", "keyint=1:repeat-headers=1:log-level=none",
-                "-f", "hevc",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=30",
+                "-t",
+                "0.5",
+                "-c:v",
+                "libx265",
+                "-x265-params",
+                "keyint=1:repeat-headers=1:log-level=none",
+                "-f",
+                "hevc",
             ])
             .arg(&es_path)
             .status();
@@ -888,9 +886,19 @@ mod tests {
 
         assert!(Command::new("ffmpeg")
             .args([
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                "-t", "0.5", "-f", "f32le", "-ac", "1",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "0.5",
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
             ])
             .arg(&pcm_path)
             .status()
@@ -900,11 +908,25 @@ mod tests {
         let es = std::fs::read(&es_path).unwrap();
         let pcm = std::fs::read(&pcm_path).unwrap();
         let units = split_access_units(&es);
-        assert!(units.len() > 5, "expected several access units, got {}", units.len());
+        assert!(
+            units.len() > 5,
+            "expected several access units, got {}",
+            units.len()
+        );
 
         // Stand in for ffplay: same Matroska over the same kind of pipe.
         let mut child = Command::new("ffmpeg")
-            .args(["-y", "-loglevel", "error", "-f", "matroska", "-i", "-", "-c", "copy"])
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "matroska",
+                "-i",
+                "-",
+                "-c",
+                "copy",
+            ])
             .arg(&out_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -919,8 +941,7 @@ mod tests {
         assert!(!extradata.is_empty(), "no parameter sets found in first AU");
 
         {
-            let mut mux =
-                unsafe { Muxer::new(320, 240, &extradata, pipe) }.expect("muxer setup");
+            let mut mux = unsafe { Muxer::new(320, 240, &extradata, pipe) }.expect("muxer setup");
 
             // Interleave audio the way the live path does: 1024-sample blocks.
             let block = 1024 * 4;
@@ -940,13 +961,19 @@ mod tests {
             }
         } // Drop writes the trailer and closes the pipe.
 
-        assert!(child.wait().unwrap().success(), "ffmpeg rejected our stream");
+        assert!(
+            child.wait().unwrap().success(),
+            "ffmpeg rejected our stream"
+        );
 
         let probe = Command::new("ffprobe")
             .args([
-                "-v", "error",
-                "-show_entries", "stream=codec_name,width,height,sample_rate,channels",
-                "-of", "csv=p=0",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,width,height,sample_rate,channels",
+                "-of",
+                "csv=p=0",
             ])
             .arg(&out_path)
             .output()
@@ -966,6 +993,9 @@ mod tests {
             .output()
             .unwrap();
         let errs = String::from_utf8_lossy(&decode.stderr);
-        assert!(decode.status.success() && errs.trim().is_empty(), "decode errors: {errs}");
+        assert!(
+            decode.status.success() && errs.trim().is_empty(),
+            "decode errors: {errs}"
+        );
     }
 }

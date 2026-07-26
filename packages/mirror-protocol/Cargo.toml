@@ -1,0 +1,15 @@
+[package]
+name = "mirror-protocol"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Wire format shared by the Mirror mobile sender and desktop receiver."
+publish = false
+
+[dependencies]
+# Only used to accelerate the magic-byte scan in `find_magic`. No allocation,
+# no std requirement beyond what this crate already uses.
+memchr = "2"
+
+[lints.rust]
+missing_docs = "warn"

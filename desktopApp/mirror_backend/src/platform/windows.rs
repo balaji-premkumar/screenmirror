@@ -20,9 +20,15 @@
 //! All elevation is done with a single PowerShell `Start-Process -Verb RunAs`
 //! so the user sees exactly one UAC prompt.
 
-#![cfg(target_os = "windows")]
+// No `#![cfg(target_os = "windows")]` here any more: `platform/mod.rs` selects
+// this file by `cfg_attr(..., path = ...)`, so it is only ever compiled on
+// Windows. Keeping the inner attribute as well made the file compile to
+// nothing whenever it *was* included, which is how it went unnoticed that it
+// had drifted out of sync with the rest of the crate.
 
-use crate::receiver::log_event;
+use super::{DriverStatus, InstallOutcome};
+use crate::log_event;
+use mirror_i18n::codes;
 use rusb::UsbContext;
 use std::io::Write;
 use std::process::Command;
@@ -30,9 +36,27 @@ use std::process::Command;
 const GOOGLE_VID: u16 = 0x18D1;
 const AOA_PID_RANGE: std::ops::RangeInclusive<u16> = 0x2D00..=0x2D05;
 
+/// Whether USB access is already granted.
+pub(super) fn driver_status() -> DriverStatus {
+    if check_driver_status() == 1 {
+        DriverStatus::Ready
+    } else {
+        DriverStatus::NeedsInstall
+    }
+}
+
+/// Installs WinUSB, prompting once for elevation.
+pub(super) fn install_driver() -> InstallOutcome {
+    match install_driver_raw() {
+        1 => InstallOutcome::Installed,
+        0 => InstallOutcome::NotNeeded,
+        _ => InstallOutcome::Failed,
+    }
+}
+
 /// 1 = an AOA accessory is claimable through WinUSB (or none is attached
 /// and a previously installed driver package is present), 0 = action needed.
-pub fn check_driver_status() -> i32 {
+fn check_driver_status() -> i32 {
     let ctx = match rusb::Context::new() {
         Ok(c) => c,
         Err(_) => return 0,
@@ -115,16 +139,10 @@ fn invalidate_driver_cache() {
     }
 }
 
-/// Entry point called at app startup (and from the "Fix USB Permissions"
-/// button). Returns 1 on success, 0 when nothing had to be done, -1 on error.
-pub fn install_driver() -> i32 {
+/// Returns 1 on success, 0 when nothing had to be done, -1 on error.
+fn install_driver_raw() -> i32 {
     if check_driver_status() == 1 {
-        log_event(
-            "INFO",
-            "DRIVER",
-            "setup",
-            "WinUSB driver already functional — no installation needed.",
-        );
+        log_event!(codes::DRIVER_SETUP_WINUSB_PRESENT);
         return 0;
     }
 
@@ -150,12 +168,7 @@ fn find_wdi_simple() -> Option<std::path::PathBuf> {
 }
 
 fn install_with_wdi(wdi: &std::path::Path) -> i32 {
-    log_event(
-        "INFO",
-        "DRIVER",
-        "setup",
-        "Installing WinUSB via bundled libwdi (single UAC prompt)...",
-    );
+    log_event!(codes::DRIVER_SETUP_LIBWDI_INSTALLING);
 
     // Install for the whole AOA PID range plus any currently attached
     // Android vendor device, so the phone works both before and after it
@@ -198,16 +211,11 @@ fn install_with_wdi(wdi: &std::path::Path) -> i32 {
     match status {
         Ok(s) if s.success() => {
             invalidate_driver_cache();
-            log_event("SUCCESS", "DRIVER", "setup", "libwdi driver installation finished.");
+            log_event!(codes::DRIVER_SETUP_LIBWDI_FINISHED);
             1
         }
         _ => {
-            log_event(
-                "ERROR",
-                "DRIVER",
-                "setup",
-                "libwdi installation failed or was cancelled at the UAC prompt.",
-            );
+            log_event!(codes::DRIVER_SETUP_LIBWDI_FAILED);
             -1
         }
     }
@@ -260,12 +268,7 @@ AccessoryName = "Android Accessory Interface (WinUSB)"
 "#;
 
 fn install_with_inf() -> i32 {
-    log_event(
-        "INFO",
-        "DRIVER",
-        "setup",
-        "Installing WinUSB INF for AOA devices via pnputil (single UAC prompt)...",
-    );
+    log_event!(codes::DRIVER_SETUP_PNPUTIL_INSTALLING);
 
     let inf_dir = std::env::temp_dir().join("mirror_driver");
     if std::fs::create_dir_all(&inf_dir).is_err() {
@@ -297,34 +300,30 @@ fn install_with_inf() -> i32 {
         Ok(s) if s.success() => {
             invalidate_driver_cache();
             if driver_package_installed() {
-                log_event(
-                    "SUCCESS",
-                    "DRIVER",
-                    "setup",
-                    "WinUSB INF installed. Replug the USB cable to activate it.",
-                );
+                log_event!(codes::DRIVER_SETUP_PNPUTIL_INSTALLED);
                 1
             } else {
-                log_event(
-                    "ERROR",
-                    "DRIVER",
-                    "setup",
-                    "pnputil did not register the package. Unsigned INF packages are \
-                     rejected when driver signature enforcement is active — bundle \
-                     bin\\wdi-simple.exe (libwdi) for fully automatic installation, \
-                     or install the driver once with Zadig.",
-                );
+                log_event!(codes::DRIVER_SETUP_PNPUTIL_UNSIGNED);
                 -1
             }
         }
         _ => {
-            log_event(
-                "ERROR",
-                "DRIVER",
-                "setup",
-                "Driver installation was cancelled or pnputil failed.",
-            );
+            log_event!(codes::DRIVER_SETUP_PNPUTIL_FAILED);
             -1
         }
     }
+}
+
+pub(super) fn obs_plugin_dir() -> Option<std::path::PathBuf> {
+    let root = obs_config_root()?;
+    root.exists().then(|| root.join("plugins"))
+}
+
+pub(super) fn default_obs_plugin_dir() -> Option<std::path::PathBuf> {
+    Some(obs_config_root()?.join("plugins"))
+}
+
+/// OBS 28+ loads user plugins from `%APPDATA%\obs-studio`.
+fn obs_config_root() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("obs-studio"))
 }

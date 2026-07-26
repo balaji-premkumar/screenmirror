@@ -33,6 +33,12 @@ pub struct MetricsManager {
     last_snapshot: Option<MetricsSnapshot>,
 }
 
+impl Default for MetricsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsManager {
     pub fn new() -> Self {
         Self {

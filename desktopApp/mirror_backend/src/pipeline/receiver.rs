@@ -1,8 +1,13 @@
+//! USB discovery, the AOA handshake, and the streaming session.
+//!
+//! This is the only module that talks to libusb. It hands demuxed video
+//! packets to `pipeline` and audio straight to `sinks`, and reports what it is
+//! doing through `telemetry::log`.
+
+use crate::log_event;
+use mirror_i18n::codes;
 use once_cell::sync::Lazy;
 use rusb::{Context as RusbContext, DeviceHandle, UsbContext};
-use serde::Serialize;
-use std::io::Write;
-use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -17,134 +22,11 @@ pub fn is_streaming() -> bool {
     *STREAMING_ACTIVE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub static LOG_BUFFER: Lazy<Mutex<Vec<LogEntry>>> = Lazy::new(|| Mutex::new(Vec::new()));
-// Cursor to track which logs have been sent to the UI
-static LOG_CURSOR: Lazy<Mutex<usize>> = Lazy::new(|| Mutex::new(0));
-
-#[derive(Serialize, Clone)]
-pub struct LogEntry {
-    pub timestamp: String,
-    pub level: String,
-    pub module: String,
-    pub thread: String,
-    pub message: String,
-}
-
-/// Returns the platform-appropriate log directory path
-fn get_log_dir() -> std::path::PathBuf {
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        std::path::PathBuf::from(home)
-            .join(".mirror_stream")
-            .join("logs")
-    } else {
-        std::env::temp_dir().join("mirror_stream").join("logs")
-    }
-}
-
-/// Rotate the log once it passes this size, keeping one previous generation.
-/// Without this `mirror_rust.log.json` grew without limit for the lifetime of
-/// the install.
-const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-/// Bounded so a burst of errors cannot grow the channel without limit. Logs
-/// are diagnostics: dropping a few under pressure beats unbounded memory on
-/// the streaming threads.
-const LOG_CHANNEL_CAPACITY: usize = 4096;
-
-fn open_log_file(log_path: &std::path::Path) -> Option<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .ok()
-}
-
-/// Dedicated log writer thread. Streaming threads only push into a channel;
-/// all file I/O (open/append/flush) happens here, off the hot path.
-static LOG_TX: Lazy<Mutex<mpsc::SyncSender<LogEntry>>> = Lazy::new(|| {
-    let (tx, rx) = mpsc::sync_channel::<LogEntry>(LOG_CHANNEL_CAPACITY);
-    std::thread::spawn(move || {
-        let log_dir = get_log_dir();
-        let _ = std::fs::create_dir_all(&log_dir);
-        let log_path = log_dir.join("mirror_rust.log.json");
-        let rotated = log_dir.join("mirror_rust.log.json.1");
-
-        let mut file = open_log_file(&log_path);
-        let mut written: u64 = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-
-        while let Ok(entry) = rx.recv() {
-            let Ok(json) = serde_json::to_string(&entry) else {
-                continue;
-            };
-            if let Some(f) = file.as_mut() {
-                if writeln!(f, "{}", json).is_ok() {
-                    written += json.len() as u64 + 1;
-                }
-            }
-            if written >= LOG_ROTATE_BYTES {
-                // Close the handle before renaming — Windows refuses to
-                // rename a file that still has an open handle.
-                drop(file.take());
-                let _ = std::fs::rename(&log_path, &rotated);
-                file = open_log_file(&log_path);
-                written = 0;
-            }
-        }
-    });
-    Mutex::new(tx)
-});
-
-pub fn log_event(level: &str, module: &str, thread: &str, message: &str) {
-    let entry = LogEntry {
-        timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
-        level: level.to_string(),
-        module: module.to_string(),
-        thread: thread.to_string(),
-        message: message.to_string(),
-    };
-
-    // Hand off to the writer thread — no file I/O here, and try_send so a
-    // backed-up writer can never block a streaming thread.
-    if let Ok(tx) = LOG_TX.lock() {
-        let _ = tx.try_send(entry.clone());
-    }
-
-    if let Ok(mut logs) = LOG_BUFFER.lock() {
-        logs.push(entry);
-        // Keep a generous buffer to allow UI to catch up, but cap at 500
-        if logs.len() > 500 {
-            // Trim the oldest 250, adjust cursor accordingly
-            logs.drain(0..250);
-            if let Ok(mut cursor) = LOG_CURSOR.lock() {
-                *cursor = cursor.saturating_sub(250);
-            }
-        }
-    }
-}
-
-/// Returns only NEW logs since the last call, enabling incremental/live updates
-pub fn get_new_logs() -> Vec<LogEntry> {
-    let logs = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-    let mut cursor = LOG_CURSOR.lock().unwrap_or_else(|e| e.into_inner());
-    let start = *cursor;
-    let end = logs.len();
-    if start >= end {
-        return Vec::new();
-    }
-    let new_logs: Vec<LogEntry> = logs[start..end].to_vec();
-    *cursor = end;
-    new_logs
-}
-
 fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), rusb::Error> {
     let timeout = Duration::from_secs(1);
     let mut buf = [0u8; 2];
 
-    log_event(
-        "INFO",
-        "AOA",
-        "handshake",
-        "Requesting AOA Protocol version...",
-    );
+    log_event!(codes::AOA_HANDSHAKE_REQUESTING_VERSION);
 
     let mut protocol = 0;
     // Attempt multiple variants for picky devices
@@ -157,24 +39,14 @@ fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), r
                 }
             }
             Err(e) => {
-                log_event(
-                    "WARN",
-                    "AOA",
-                    "handshake",
-                    &format!("Handshake attempt {} failed: {:?}", i + 1, e),
-                );
+                log_event!(codes::AOA_HANDSHAKE_ATTEMPT_FAILED, "attempt" => i + 1, "error" => format!("{e:?}"));
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
     }
 
     if protocol < 1 {
-        log_event(
-            "ERROR",
-            "AOA",
-            "handshake",
-            "Device refused AOA (v0). Possible MTP lock or accessory already active.",
-        );
+        log_event!(codes::AOA_HANDSHAKE_REFUSED);
         return Err(rusb::Error::NotSupported);
     }
 
@@ -188,30 +60,15 @@ fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), r
     ];
     for (i, s) in strings.iter().enumerate() {
         match handle.write_control(0x40, 52, 0, i as u16, s.as_bytes(), timeout) {
-            Ok(_) => log_event(
-                "INFO",
-                "AOA",
-                "handshake",
-                &format!("String {} set: \"{}\"", i, s),
-            ),
+            Ok(_) => log_event!(codes::AOA_HANDSHAKE_STRING_SET, "index" => i, "value" => s),
             Err(e) => {
-                log_event(
-                    "ERROR",
-                    "AOA",
-                    "handshake",
-                    &format!("Failed to set string {}: {:?}", i, e),
-                );
+                log_event!(codes::AOA_HANDSHAKE_STRING_FAILED, "index" => i, "error" => format!("{e:?}"));
                 return Err(e);
             }
         }
     }
 
-    log_event(
-        "SUCCESS",
-        "AOA",
-        "handshake",
-        "Switching device to Accessory Mode...",
-    );
+    log_event!(codes::AOA_HANDSHAKE_SWITCHING);
     handle.write_control(0x40, 53, 0, 0, &[], timeout)?;
     Ok(())
 }
@@ -222,12 +79,7 @@ impl Drop for StreamingActiveGuard {
     fn drop(&mut self) {
         let mut active = STREAMING_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         *active = false;
-        log_event(
-            "WARN",
-            "USB",
-            "streaming",
-            "Session guard dropped: Link state reset.",
-        );
+        log_event!(codes::USB_STREAMING_SESSION_RESET);
     }
 }
 
@@ -249,38 +101,23 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
     std::thread::spawn(move || {
         let _guard = StreamingActiveGuard;
 
-        log_event("INFO", "USB", "streaming", "Starting USB session thread...");
+        log_event!(codes::USB_STREAMING_THREAD_STARTED);
 
         let handle = match device.open() {
             Ok(h) => h,
             Err(e) => {
-                log_event(
-                    "ERROR",
-                    "USB",
-                    "streaming",
-                    &format!("Open failed: {:?}. Connection abandoned.", e),
-                );
+                log_event!(codes::USB_STREAMING_OPEN_FAILED, "error" => format!("{e:?}"));
                 return;
             }
         };
 
         let _ = handle.set_auto_detach_kernel_driver(true);
         if let Err(e) = handle.claim_interface(0) {
-            log_event(
-                "ERROR",
-                "USB",
-                "streaming",
-                &format!("Claim failed: {:?}. Device busy.", e),
-            );
+            log_event!(codes::USB_STREAMING_CLAIM_FAILED, "error" => format!("{e:?}"));
             return;
         }
 
-        log_event(
-            "SUCCESS",
-            "USB",
-            "streaming",
-            "Mobile link established. Interface 0 claimed.",
-        );
+        log_event!(codes::USB_STREAMING_LINK_ESTABLISHED);
 
         let mut endpoint_in = 0x81;
         let mut endpoint_out = 0x02;
@@ -308,16 +145,11 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
         }
 
         if !found_out {
-            log_event(
-                "WARN",
-                "USB",
-                "streaming",
-                "Specific OUT endpoint not detected, using default 0x02.",
-            );
+            log_event!(codes::USB_STREAMING_DEFAULT_ENDPOINT);
         }
 
         let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer
-        let mut demuxer = crate::demuxer::Demuxer::new();
+        let mut demuxer = crate::pipeline::demuxer::Demuxer::new();
         let mut last_activity = Instant::now();
         // Short timeout so pending config commands and shutdown signals are
         // observed quickly; at 120 fps data arrives every ~8 ms anyway, so
@@ -326,12 +158,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
 
         loop {
             if !crate::session_alive(my_gen) {
-                log_event(
-                    "INFO",
-                    "USB",
-                    "streaming",
-                    "Streaming loop received termination signal.",
-                );
+                log_event!(codes::USB_STREAMING_THREAD_STOPPING);
                 break;
             }
 
@@ -339,7 +166,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
             if let Ok(mut fd) = FORCE_DISCONNECT.lock() {
                 if *fd {
                     *fd = false;
-                    log_event("WARN", "USB", "streaming", "User disconnect triggered.");
+                    log_event!(codes::USB_STREAMING_USER_DISCONNECT);
                     break;
                 }
             }
@@ -354,26 +181,11 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
                 let mut data = config_json.as_bytes().to_vec();
                 data.push(0); // Null terminator
 
-                log_event(
-                    "INFO",
-                    "USB",
-                    "streaming",
-                    &format!("Sending config: {} bytes", data.len()),
-                );
+                log_event!(codes::USB_STREAMING_CONFIG_SENDING, "bytes" => data.len());
                 match handle.write_bulk(endpoint_out, &data, Duration::from_millis(1000)) {
-                    Ok(n) => log_event(
-                        "SUCCESS",
-                        "USB",
-                        "streaming",
-                        &format!("Config sent ({} bytes)", n),
-                    ),
+                    Ok(n) => log_event!(codes::USB_STREAMING_CONFIG_SENT, "bytes" => n),
                     Err(e) => {
-                        log_event(
-                            "ERROR",
-                            "USB",
-                            "streaming",
-                            &format!("Config write error: {:?}", e),
-                        );
+                        log_event!(codes::USB_STREAMING_CONFIG_FAILED, "error" => format!("{e:?}"));
                         // Re-queue
                         if let Ok(mut pending) = PENDING_CONFIG.lock() {
                             if pending.is_none() {
@@ -388,52 +200,42 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
             match handle.read_bulk(endpoint_in, &mut buf, timeout_duration) {
                 Ok(len) if len > 0 => {
                     last_activity = Instant::now();
-                    if let Ok(mut m) = crate::metrics::METRICS.lock() {
+                    if let Ok(mut m) = crate::telemetry::metrics::METRICS.lock() {
                         m.record_usb_bytes(len);
                     }
 
                     let frames = demuxer.feed(&buf[..len]);
                     for frame in frames {
-                        match frame.frame_type {
-                            crate::demuxer::FrameType::Video => {
+                        match frame.packet_type {
+                            mirror_protocol::PacketType::Video => {
                                 // ffplay gets the encoded stream verbatim; it
                                 // is a no-op (one atomic load) when no player
                                 // session is running.
-                                crate::player::push_video(&frame.data);
+                                crate::sinks::player::push_video(&frame.data);
                                 // Moves the Vec — no copy on this path.
                                 crate::push_video_packet(frame.data);
                             }
-                            crate::demuxer::FrameType::Audio => {
-                                crate::audio::push_audio(&frame.data);
+                            mirror_protocol::PacketType::Audio => {
+                                crate::sinks::push_audio(&frame.data);
                             }
                         }
                     }
                 }
                 Ok(_) | Err(rusb::Error::Timeout) => {
                     if last_activity.elapsed() >= Duration::from_secs(5) {
-                        log_event(
-                            "ERROR",
-                            "USB",
-                            "streaming",
-                            "Inactivity timeout: mobile disconnected.",
-                        );
+                        log_event!(codes::USB_STREAMING_INACTIVITY_TIMEOUT);
                         break;
                     }
                 }
                 Err(e) => {
-                    log_event(
-                        "ERROR",
-                        "USB",
-                        "streaming",
-                        &format!("Fatal Read Error: {:?}. Closing link.", e),
-                    );
+                    log_event!(codes::USB_STREAMING_READ_FAILED, "error" => format!("{e:?}"));
                     break;
                 }
             }
         }
 
         let _ = handle.release_interface(0);
-        log_event("INFO", "USB", "streaming", "Session thread ended.");
+        log_event!(codes::USB_STREAMING_THREAD_ENDED);
     });
 }
 
@@ -459,12 +261,7 @@ fn get_device_info(device: &rusb::Device<RusbContext>) -> Option<String> {
 }
 
 pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
-    log_event(
-        "INFO",
-        "FFI",
-        "handshake",
-        &format!("CLI Handshake for {:04X}:{:04X}", target_vid, target_pid),
-    );
+    log_event!(codes::FFI_HANDSHAKE_REQUESTED, "vid" => format!("{target_vid:04X}"), "pid" => format!("{target_pid:04X}"));
 
     // Manual trigger re-enables auto-reconnect for this device re-enumeration
     if let Ok(mut auto) = AUTO_RECONNECT_ENABLED.lock() {
@@ -476,12 +273,7 @@ pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
         let context = match RusbContext::new() {
             Ok(c) => c,
             Err(e) => {
-                log_event(
-                    "ERROR",
-                    "FFI",
-                    "handshake",
-                    &format!("Context Error: {:?}", e),
-                );
+                log_event!(codes::FFI_HANDSHAKE_CONTEXT_FAILED, "error" => format!("{e:?}"));
                 return;
             }
         };
@@ -493,12 +285,7 @@ pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
                         // If it's already an accessory, connect immediately instead
                         // of waiting for the next discovery poll.
                         if target_vid == 0x18D1 && (0x2D00..=0x2D05).contains(&target_pid) {
-                            log_event(
-                                "INFO",
-                                "FFI",
-                                "handshake",
-                                "Device is already an accessory, connecting directly.",
-                            );
+                            log_event!(codes::FFI_HANDSHAKE_ALREADY_ACCESSORY);
                             if let Ok(mut auto) = AUTO_RECONNECT_ENABLED.lock() {
                                 *auto = true;
                             }
@@ -512,31 +299,16 @@ pub fn trigger_manual_handshake(target_vid: u16, target_pid: u16) -> i32 {
                                 let _ = handle.reset();
                                 std::thread::sleep(Duration::from_millis(500));
                                 if let Err(e) = perform_aoa_handshake(&mut handle) {
-                                    log_event(
-                                        "ERROR",
-                                        "FFI",
-                                        "handshake",
-                                        &format!("Handshake failed: {:?}", e),
-                                    );
+                                    log_event!(codes::FFI_HANDSHAKE_FAILED, "error" => format!("{e:?}"));
                                 } else {
-                                    log_event(
-                                        "SUCCESS",
-                                        "FFI",
-                                        "handshake",
-                                        "Switching to accessory mode...",
-                                    );
+                                    log_event!(codes::FFI_HANDSHAKE_SWITCHING);
                                     drop(handle);
                                     wait_for_aoa_reenumeration(&context);
                                 }
                                 return;
                             }
                             Err(e) => {
-                                log_event(
-                                    "ERROR",
-                                    "FFI",
-                                    "handshake",
-                                    &format!("Open error: {:?}", e),
-                                );
+                                log_event!(codes::FFI_HANDSHAKE_OPEN_FAILED, "error" => format!("{e:?}"));
                                 return;
                             }
                         }
@@ -557,19 +329,14 @@ fn wait_for_aoa_reenumeration(context: &RusbContext) -> i32 {
                     let vid = desc.vendor_id();
                     let pid = desc.product_id();
                     if vid == 0x18D1 && (0x2D00..=0x2D05).contains(&pid) {
-                        log_event("SUCCESS", "RE-ENUM", "handshake", "AOA Accessory found.");
+                        log_event!(codes::REENUM_ACCESSORY_FOUND);
                         return 0;
                     }
                 }
             }
         }
     }
-    log_event(
-        "ERROR",
-        "RE-ENUM",
-        "handshake",
-        "Device re-enumeration timeout.",
-    );
+    log_event!(codes::REENUM_TIMEOUT);
     -4
 }
 
@@ -578,33 +345,18 @@ pub fn start_usb_listener_thread(my_gen: u64) {
         let context = match RusbContext::new() {
             Ok(c) => c,
             Err(e) => {
-                log_event(
-                    "ERROR",
-                    "SYSTEM",
-                    "discovery",
-                    &format!("Fatal Rust Context Error: {:?}", e),
-                );
+                log_event!(codes::SYSTEM_DISCOVERY_CONTEXT_FAILED, "error" => format!("{e:?}"));
                 return;
             }
         };
-        log_event(
-            "INFO",
-            "SYSTEM",
-            "discovery",
-            "Engine background scanning loop active.",
-        );
+        log_event!(codes::SYSTEM_DISCOVERY_STARTED);
 
         let mut info_cache: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
         loop {
             if !crate::session_alive(my_gen) {
-                log_event(
-                    "INFO",
-                    "SYSTEM",
-                    "discovery",
-                    "Discovery thread received termination signal.",
-                );
+                log_event!(codes::SYSTEM_DISCOVERY_STOPPING);
                 break;
             }
 
@@ -684,12 +436,7 @@ pub fn start_usb_listener_thread(my_gen: u64) {
                     }
                 }
                 Err(e) => {
-                    log_event(
-                        "WARN",
-                        "SYSTEM",
-                        "discovery",
-                        &format!("USB Bus poll failed: {:?}", e),
-                    );
+                    log_event!(codes::SYSTEM_DISCOVERY_POLL_FAILED, "error" => format!("{e:?}"));
                 }
             }
             std::thread::sleep(Duration::from_secs(2));

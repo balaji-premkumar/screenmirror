@@ -1,5 +1,13 @@
-//! Video packet queue and HEVC bitstream helpers shared by the USB receiver
-//! (producer) and the decoder thread (consumer).
+//! Getting the stream off the wire and into decoded frames.
+//!
+//! The stages run in order: `receiver` reads USB bulk transfers, `demuxer`
+//! reassembles them into frames, this module's queue carries video packets
+//! across a thread boundary, and `decoder` turns them into BGRA. `framepool`
+//! recycles the buffers so a 60 fps session is not allocating 8 MB per frame.
+//!
+//! # Packet queue
+//!
+//! Shared by the USB receiver (producer) and the decoder thread (consumer).
 //!
 //! Design goals:
 //! - The producer never blocks: on overflow we drop the oldest *droppable*
@@ -8,59 +16,20 @@
 //! - The consumer blocks on a condvar instead of sleep-polling, so a frame
 //!   is picked up the moment it arrives.
 
+pub mod decoder;
+pub mod demuxer;
+pub mod framepool;
+pub mod receiver;
+
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-/// Result of scanning an HEVC Annex-B packet for NAL units.
-#[derive(Default, Clone, Copy)]
-pub struct PacketInfo {
-    /// Contains an IRAP picture (BLA/IDR/CRA, NAL types 16..=21)
-    pub has_keyframe: bool,
-    /// Contains parameter sets (VPS/SPS/PPS, NAL types 32..=34)
-    pub has_csd: bool,
-}
-
-impl PacketInfo {
-    pub fn is_essential(&self) -> bool {
-        self.has_keyframe || self.has_csd
-    }
-}
-
-/// Scan an Annex-B HEVC bitstream for NAL unit types.
-/// Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes and
-/// packets that contain multiple NAL units (e.g. VPS+SPS+PPS+IDR in one
-/// MediaCodec output buffer).
-pub fn scan_packet(data: &[u8]) -> PacketInfo {
-    let mut info = PacketInfo::default();
-    let mut i = 0;
-    while i + 3 < data.len() {
-        // Find next start code
-        if data[i] == 0 && data[i + 1] == 0 {
-            let nal_start = if data[i + 2] == 1 {
-                i + 3
-            } else if data[i + 2] == 0 && i + 3 < data.len() && data[i + 3] == 1 {
-                i + 4
-            } else {
-                i += 1;
-                continue;
-            };
-            if nal_start < data.len() {
-                // HEVC NAL header: forbidden_zero(1) | nal_unit_type(6) | ...
-                let nal_type = (data[nal_start] >> 1) & 0x3F;
-                match nal_type {
-                    16..=21 => info.has_keyframe = true, // BLA/IDR/CRA (IRAP)
-                    32..=34 => info.has_csd = true,      // VPS/SPS/PPS
-                    _ => {}
-                }
-            }
-            i = nal_start;
-        } else {
-            i += 1;
-        }
-    }
-    info
-}
+// The HEVC scan lives in `mirror-protocol`, next to the frame format. This
+// file used to carry its own Annex-B walker — the third copy in the repo,
+// alongside the mobile sender's and the player's — and the three had already
+// drifted on how they treated a trailing start code.
+pub use mirror_protocol::hevc::{scan_packet, PacketInfo};
 
 /// A queued packet plus the result of scanning it, so the overflow path never
 /// has to re-read packet bytes.
@@ -100,10 +69,7 @@ impl VideoQueue {
         while q.len() >= self.cap {
             // Prefer dropping the oldest packet that is neither CSD nor a
             // keyframe; if everything is essential, drop the oldest anyway.
-            let victim = q
-                .iter()
-                .position(|p| !p.info.is_essential())
-                .unwrap_or(0);
+            let victim = q.iter().position(|p| !p.info.is_essential()).unwrap_or(0);
             q.remove(victim);
             dropped += 1;
         }
@@ -126,19 +92,23 @@ impl VideoQueue {
         q.pop_front().map(|p| p.data)
     }
 
+    /// How many packets are waiting. Reported to the interface as buffer depth.
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// Whether the decoder has caught up with the receiver.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The queue's fixed capacity, used to report buffer health as a fraction.
     pub fn capacity(&self) -> usize {
         self.cap
     }
 
     pub fn clear(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -174,7 +144,7 @@ mod tests {
         pkt.extend(nal(34)); // PPS
         pkt.extend(nal3(19)); // IDR with 3-byte start code
         let info = scan_packet(&pkt);
-        assert!(info.has_csd);
+        assert!(info.has_parameter_sets);
         assert!(info.has_keyframe);
     }
 
@@ -195,7 +165,7 @@ mod tests {
         assert_eq!(dropped, 1);
         // CSD packet still at the front
         let first = q.pop_timeout(Duration::from_millis(10)).unwrap();
-        assert!(scan_packet(&first).has_csd);
+        assert!(scan_packet(&first).has_parameter_sets);
     }
 
     #[test]

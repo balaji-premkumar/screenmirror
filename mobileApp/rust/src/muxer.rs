@@ -1,4 +1,4 @@
-use byteorder::{LittleEndian, WriteBytesExt};
+use mirror_protocol::{hevc, PacketType, HEADER_SIZE};
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,41 +16,14 @@ static BUFFER_POOL: Lazy<Mutex<Vec<Vec<u8>>>> = Lazy::new(|| {
     Mutex::new(pool)
 });
 
-/// Frame type tag bytes sent over the USB link
-#[derive(Clone, Copy)]
-#[repr(u8)]
-pub enum PacketType {
-    Video = 0x01,
-    Audio = 0x02,
-}
-
 /// Scan an Annex-B HEVC packet for parameter sets (VPS/SPS/PPS).
-/// Handles both 3- and 4-byte start codes. Used to preserve codec config
-/// packets across overflow drops and muxer restarts.
+///
+/// Used to preserve codec config packets across overflow drops and muxer
+/// restarts. The scan itself lives in `mirror-protocol` because the desktop
+/// receiver needs the same walker to build its `hvcC` record; keeping two
+/// copies is how the two ends came to disagree about trailing start codes.
 pub fn contains_csd(data: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 {
-            let nal_start = if data[i + 2] == 1 {
-                i + 3
-            } else if data[i + 2] == 0 && i + 3 < data.len() && data[i + 3] == 1 {
-                i + 4
-            } else {
-                i += 1;
-                continue;
-            };
-            if nal_start < data.len() {
-                let nal_type = (data[nal_start] >> 1) & 0x3F;
-                if (32..=34).contains(&nal_type) {
-                    return true; // VPS/SPS/PPS
-                }
-            }
-            i = nal_start;
-        } else {
-            i += 1;
-        }
-    }
-    false
+    hevc::contains_parameter_sets(data)
 }
 
 /// A framed packet plus whether it carries parameter sets. Computed once on
@@ -193,16 +166,13 @@ impl Muxer {
     fn frame_packet_pooled(ptype: PacketType, data: &[u8]) -> Vec<u8> {
         let mut buf = if let Ok(mut pool) = BUFFER_POOL.lock() {
             pool.pop()
-                .unwrap_or_else(|| Vec::with_capacity(data.len() + 9))
+                .unwrap_or_else(|| Vec::with_capacity(data.len() + HEADER_SIZE))
         } else {
-            Vec::with_capacity(data.len() + 9)
+            Vec::with_capacity(data.len() + HEADER_SIZE)
         };
 
-        buf.clear();
-        buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-        buf.push(ptype as u8);
-        buf.write_u32::<LittleEndian>(data.len() as u32).unwrap();
-        buf.extend_from_slice(data);
+        // Clears and reserves for us, so a pooled buffer is reused in place.
+        mirror_protocol::write_frame(&mut buf, ptype, data);
         buf
     }
 
@@ -225,12 +195,21 @@ mod tests {
     }
 
     #[test]
-    fn frame_header_layout() {
+    fn pooled_framing_matches_the_shared_protocol() {
+        // The layout itself is covered in mirror-protocol. What matters here
+        // is that the pooled path produces byte-identical output to the plain
+        // one — a reused buffer that was not cleared would append instead.
         let f = framed(PacketType::Video, b"abc");
-        assert_eq!(&f[0..4], &[0xDE, 0xAD, 0xBE, 0xEF]);
-        assert_eq!(f[4], 0x01);
-        assert_eq!(u32::from_le_bytes([f[5], f[6], f[7], f[8]]), 3);
-        assert_eq!(&f[9..], b"abc");
+        let mut expected = Vec::new();
+        mirror_protocol::write_frame(&mut expected, PacketType::Video, b"abc");
+        assert_eq!(f, expected);
+
+        // Recycle the buffer and frame something shorter through it.
+        Muxer::release_buffer(f);
+        let f2 = framed(PacketType::Audio, b"z");
+        let mut expected2 = Vec::new();
+        mirror_protocol::write_frame(&mut expected2, PacketType::Audio, b"z");
+        assert_eq!(f2, expected2);
     }
 
     #[test]
@@ -261,7 +240,7 @@ mod tests {
         }
         // First packet out must still be the CSD
         match q.pop_next(Duration::from_millis(10)) {
-            PopResult::Packet(p) => assert!(contains_csd(&p[9..])),
+            PopResult::Packet(p) => assert!(contains_csd(&p[HEADER_SIZE..])),
             _ => panic!("expected packet"),
         }
     }

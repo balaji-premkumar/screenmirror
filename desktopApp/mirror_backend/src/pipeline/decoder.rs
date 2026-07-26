@@ -1,9 +1,10 @@
+use crate::log_event;
 use crate::pipeline::VideoQueue;
-use crate::receiver::log_event;
 use ffmpeg::codec::{decoder, packet};
 use ffmpeg::software::scaling::{context::Context as ScaleContext, flag};
 use ffmpeg::util::format::pixel::Pixel;
 use ffmpeg_next as ffmpeg;
+use mirror_i18n::codes;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,12 +85,7 @@ unsafe fn create_hw_device() -> Option<(*mut ffmpeg::ffi::AVBufferRef, i32)> {
             0,
         );
         if ret == 0 && !ctx.is_null() {
-            log_event(
-                "SUCCESS",
-                "DECODER",
-                "init",
-                &format!("Hardware decode device created: {}", name),
-            );
+            log_event!(codes::DECODER_INIT_HARDWARE, "device" => name);
             return Some((ctx, *pix_fmt as i32));
         }
     }
@@ -151,12 +147,7 @@ impl H265Decoder {
 
         if !using_hw {
             TARGET_HW_FMT.store(-1, Ordering::Relaxed);
-            log_event(
-                "INFO",
-                "DECODER",
-                "init",
-                "No hardware decode device — using multithreaded software HEVC",
-            );
+            log_event!(codes::DECODER_INIT_SOFTWARE);
         }
 
         let decoder = context.decoder().video()?;
@@ -238,7 +229,7 @@ impl H265Decoder {
                 || self
                     .bgra_frame
                     .as_ref()
-                    .map_or(true, |f| f.width() != width || f.height() != height);
+                    .is_none_or(|f| f.width() != width || f.height() != height);
 
             if needs_new_scaler {
                 let scaler = ScaleContext::get(
@@ -267,7 +258,7 @@ impl H265Decoder {
                     let data = bgra_frame.data(0);
 
                     // Acquire buffer from pool
-                    let mut buffer = crate::framepool::acquire(width * height * 4);
+                    let mut buffer = crate::pipeline::framepool::acquire(width * height * 4);
 
                     // Copy row by row to ensure it's tightly packed
                     if stride == width * 4 {
@@ -292,17 +283,12 @@ impl H265Decoder {
 
 pub fn start_decoder_thread(queue: Arc<VideoQueue>, my_gen: u64) {
     std::thread::spawn(move || {
-        log_event("INFO", "SYSTEM", "decoder", "FFmpeg Decoder Thread Started");
+        log_event!(codes::DECODER_THREAD_STARTED);
 
         let mut decoder = match H265Decoder::new(true) {
             Ok(d) => d,
             Err(e) => {
-                log_event(
-                    "FATAL",
-                    "DECODER",
-                    "init",
-                    &format!("Failed to initialize decoder: {:?}", e),
-                );
+                log_event!(codes::DECODER_INIT_FAILED, "error" => format!("{e:?}"));
                 return;
             }
         };
@@ -313,12 +299,7 @@ pub fn start_decoder_thread(queue: Arc<VideoQueue>, my_gen: u64) {
 
         loop {
             if !crate::session_alive(my_gen) {
-                log_event(
-                    "INFO",
-                    "SYSTEM",
-                    "decoder",
-                    "Decoder thread received termination signal.",
-                );
+                log_event!(codes::DECODER_THREAD_STOPPING);
                 break;
             }
 
@@ -355,22 +336,12 @@ pub fn start_decoder_thread(queue: Arc<VideoQueue>, my_gen: u64) {
                 Err(e) => {
                     consecutive_errors += 1;
                     if consecutive_errors <= 3 {
-                        log_event(
-                            "ERROR",
-                            "DECODER",
-                            "pipeline",
-                            &format!("Decode failed: {:?}", e),
-                        );
+                        log_event!(codes::DECODER_DECODE_FAILED, "error" => format!("{e:?}"));
                     }
                     // A hardware session that persistently fails (unsupported
                     // profile, driver quirk) gets rebuilt in software once.
                     if consecutive_errors == 60 && decoder.is_hw() {
-                        log_event(
-                            "WARN",
-                            "DECODER",
-                            "pipeline",
-                            "Hardware decode failing persistently — rebuilding in software mode",
-                        );
+                        log_event!(codes::DECODER_HARDWARE_FALLBACK);
                         if let Ok(sw) = H265Decoder::new(false) {
                             decoder = sw;
                             consecutive_errors = 0;

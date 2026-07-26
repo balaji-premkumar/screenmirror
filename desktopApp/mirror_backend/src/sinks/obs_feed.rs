@@ -22,7 +22,8 @@
 //! situation is indistinguishable from normal progress, so the reader would
 //! silently emit garbage.
 
-use crate::receiver::log_event;
+use crate::log_event;
+use mirror_i18n::codes;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -32,15 +33,7 @@ static OBS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_enabled(enabled: bool) {
     OBS_ENABLED.store(enabled, Ordering::Relaxed);
-    log_event(
-        "INFO",
-        "OBS",
-        "feed",
-        &format!(
-            "OBS shared memory feed {}",
-            if enabled { "ENABLED" } else { "DISABLED" }
-        ),
-    );
+    log_event!(codes::OBS_FEED_TOGGLED, "state" => if enabled { "enabled" } else { "disabled" });
 }
 
 pub fn is_enabled() -> bool {
@@ -116,7 +109,7 @@ pub fn init_audio() -> bool {
             0o600,
         );
         if fd < 0 {
-            log_event("ERROR", "OBS", "shmem", "shm_open for audio feed failed");
+            log_event!(codes::OBS_SHMEM_AUDIO_OPEN_FAILED);
             return false;
         }
         // The OBS process runs as the same user; 0600 keeps other local
@@ -143,7 +136,7 @@ pub fn init_audio() -> bool {
         if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
             *shmem = Some(AudioShmem { ptr: base, fd });
         }
-        log_event("SUCCESS", "OBS", "shmem", "OBS audio shared memory initialised");
+        log_event!(codes::OBS_SHMEM_AUDIO_READY);
         true
     }
 
@@ -158,7 +151,7 @@ pub fn init_audio() -> bool {
             win::AUDIO_MAP_NAME.as_ptr(),
         );
         if handle.is_null() {
-            log_event("ERROR", "OBS", "shmem", "CreateFileMapping for audio feed failed");
+            log_event!(codes::OBS_SHMEM_AUDIO_MAP_FAILED);
             return false;
         }
         let ptr = win::MapViewOfFile(handle, win::FILE_MAP_ALL_ACCESS, 0, 0, AUDIO_SHM_SIZE);
@@ -173,18 +166,13 @@ pub fn init_audio() -> bool {
         if let Ok(mut shmem) = AUDIO_SHMEM.lock() {
             *shmem = Some(AudioShmem { ptr: base, handle });
         }
-        log_event("SUCCESS", "OBS", "shmem", "OBS audio shared memory initialised");
+        log_event!(codes::OBS_SHMEM_AUDIO_READY);
         true
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
     {
-        log_event(
-            "WARN",
-            "OBS",
-            "shmem",
-            "OBS shared memory feed not supported on this platform",
-        );
+        log_event!(codes::OBS_SHMEM_UNSUPPORTED);
         false
     }
 }
@@ -246,7 +234,7 @@ pub fn cleanup() {
             }
             #[cfg(not(any(unix, target_os = "windows")))]
             let _ = shm;
-            log_event("INFO", "OBS", "shmem", "OBS audio shared memory released");
+            log_event!(codes::OBS_SHMEM_AUDIO_RELEASED);
         }
     }
 }
@@ -384,48 +372,19 @@ fn probe_obs_running() -> bool {
 }
 
 /// Find the user-level OBS plugin directory.
+///
+/// The per-platform paths live in `crate::platform`; this only decides what to
+/// do when OBS has never been run. Installing into the default location is
+/// still useful there — OBS reads the directory at startup, so the plugin is
+/// picked up the first time the user launches it.
 pub fn get_obs_plugin_dir() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-
-        // Flatpak install
-        let flatpak_config = format!("{}/.var/app/com.obsproject.Studio/config/obs-studio", home);
-        if std::path::Path::new(&flatpak_config).exists() {
-            return Some(format!("{}/plugins", flatpak_config));
-        }
-
-        // Native install — use ~/.config/obs-studio/ (OBS 28+ default)
-        let config_dir = format!("{}/.config/obs-studio", home);
-        if std::path::Path::new(&config_dir).exists() {
-            return Some(format!("{}/plugins", config_dir));
-        }
-
-        // Legacy path
-        let legacy_dir = format!("{}/.obs-studio", home);
-        if std::path::Path::new(&legacy_dir).exists() {
-            return Some(format!("{}/plugins", legacy_dir));
-        }
-
-        // If OBS is installed but hasn't been run yet, use the modern default
-        if check_obs_installed() {
-            return Some(format!("{}/plugins", config_dir));
-        }
-
-        None
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // OBS 28+ loads user plugins from %APPDATA%\obs-studio\plugins
-        let appdata = std::env::var("APPDATA").ok()?;
-        let config_dir = format!(r"{appdata}\obs-studio");
-        if std::path::Path::new(&config_dir).exists() || check_obs_installed() {
-            return Some(format!(r"{config_dir}\plugins"));
-        }
-        None
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    None
+    crate::platform::obs_plugin_dir()
+        .or_else(|| {
+            check_obs_installed()
+                .then(crate::platform::default_obs_plugin_dir)
+                .flatten()
+        })
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Bump this whenever the SHM header layout changes — forces old plugin binaries
@@ -435,10 +394,7 @@ pub fn get_obs_plugin_dir() -> Option<String> {
 /// misread the ring entirely. The version file forces it to be replaced.
 const PLUGIN_VERSION: &str = "3.0.0";
 
-#[cfg(target_os = "windows")]
-const PLUGIN_BINARY: &str = "mirror-source.dll";
-#[cfg(not(target_os = "windows"))]
-const PLUGIN_BINARY: &str = "mirror-source.so";
+const PLUGIN_BINARY: &str = crate::platform::obs_plugin_filename();
 
 /// Check whether our OBS plugin is already installed and up to date.
 pub fn check_plugin_installed() -> bool {
@@ -466,17 +422,12 @@ pub fn check_plugin_installed() -> bool {
 /// Build (Linux) or copy (Windows) and install the OBS plugin.
 /// Returns 0 on success, -1 on failure.
 pub fn install_plugin(project_root: &str) -> i32 {
-    log_event(
-        "INFO",
-        "OBS",
-        "install",
-        &format!("Starting OBS plugin install (v{})...", PLUGIN_VERSION),
-    );
+    log_event!(codes::OBS_INSTALL_STARTED, "version" => PLUGIN_VERSION);
 
     let plugin_dir = match get_obs_plugin_dir() {
         Some(d) => d,
         None => {
-            log_event("ERROR", "OBS", "install", "Cannot find OBS plugin directory");
+            log_event!(codes::OBS_INSTALL_DIR_NOT_FOUND);
             return -1;
         }
     };
@@ -500,12 +451,7 @@ pub fn install_plugin(project_root: &str) -> i32 {
     // 2. Linux only: compile locally when no binary is bundled
     #[cfg(target_os = "linux")]
     if plugin_src.is_none() {
-        log_event(
-            "INFO",
-            "OBS",
-            "install",
-            "Plugin not found in bin/, attempting local compile...",
-        );
+        log_event!(codes::OBS_INSTALL_COMPILING);
         let status = std::process::Command::new("gcc")
             .args([
                 "-shared",
@@ -524,12 +470,7 @@ pub fn install_plugin(project_root: &str) -> i32 {
         if status.map(|s| s.success()).unwrap_or(false) {
             plugin_src = Some(precompiled_dev.clone());
         } else {
-            log_event(
-                "ERROR",
-                "OBS",
-                "install",
-                "Failed to compile plugin locally. Is libobs-dev installed?",
-            );
+            log_event!(codes::OBS_INSTALL_COMPILE_FAILED);
             return -1;
         }
     }
@@ -537,13 +478,7 @@ pub fn install_plugin(project_root: &str) -> i32 {
     let final_src = match plugin_src {
         Some(p) => p,
         None => {
-            log_event(
-                "ERROR",
-                "OBS",
-                "install",
-                "No plugin binary found. On Windows, mirror-source.dll must be \
-                 bundled in bin/ (build it with obs_plugin/CMakeLists.txt).",
-            );
+            log_event!(codes::OBS_INSTALL_BINARY_MISSING);
             return -1;
         }
     };
@@ -553,49 +488,24 @@ pub fn install_plugin(project_root: &str) -> i32 {
     let bin_install_dir = format!("{}/bin/64bit", base_install_dir);
 
     if std::fs::create_dir_all(&bin_install_dir).is_err() {
-        log_event(
-            "ERROR",
-            "OBS",
-            "install",
-            "Failed to create plugin install directory",
-        );
+        log_event!(codes::OBS_INSTALL_MKDIR_FAILED);
         return -1;
     }
 
     let dst = format!("{}/{}", bin_install_dir, PLUGIN_BINARY);
-    log_event(
-        "INFO",
-        "OBS",
-        "install",
-        &format!("Copying plugin from {} to {}", final_src, dst),
-    );
+    log_event!(codes::OBS_INSTALL_COPYING, "from" => &final_src, "to" => &dst);
     if let Err(e) = std::fs::copy(&final_src, &dst) {
-        log_event(
-            "ERROR",
-            "OBS",
-            "install",
-            &format!("Failed to copy plugin binary: {}", e),
-        );
+        log_event!(codes::OBS_INSTALL_COPY_FAILED, "error" => e);
         return -1;
     }
 
     // Write version file
     let version_path = format!("{}/version.txt", base_install_dir);
     if let Err(e) = std::fs::write(&version_path, PLUGIN_VERSION) {
-        log_event(
-            "WARN",
-            "OBS",
-            "install",
-            &format!("Failed to write version file to {}: {}", version_path, e),
-        );
+        log_event!(codes::OBS_INSTALL_VERSION_WRITE_FAILED, "path" => &version_path, "error" => e);
     }
 
-    log_event(
-        "SUCCESS",
-        "OBS",
-        "install",
-        &format!("Plugin v{} installed to {}", PLUGIN_VERSION, dst),
-    );
+    log_event!(codes::OBS_INSTALL_COMPLETE, "version" => PLUGIN_VERSION, "path" => &dst);
 
     0
 }
@@ -610,8 +520,8 @@ mod tests {
         let shm = AUDIO_SHMEM.lock().unwrap();
         let base = shm.as_ref().unwrap().ptr;
         unsafe {
-            let written = (&*(base.add(AUDIO_OFF_WRITTEN) as *const AtomicU64))
-                .load(Ordering::Acquire);
+            let written =
+                (&*(base.add(AUDIO_OFF_WRITTEN) as *const AtomicU64)).load(Ordering::Acquire);
             let data = base.add(AUDIO_HEADER_SIZE) as *const f32;
 
             let mut avail = written - *consumed;
@@ -653,8 +563,7 @@ mod tests {
             let base = shm.as_ref().unwrap().ptr;
             let magic = unsafe { std::slice::from_raw_parts(base, 4) };
             assert_eq!(magic, b"MIRA");
-            let session =
-                unsafe { *(base.add(AUDIO_OFF_SESSION) as *const u64) };
+            let session = unsafe { *(base.add(AUDIO_OFF_SESSION) as *const u64) };
             assert_ne!(session, 0, "session id must be set");
         }
 
@@ -670,7 +579,9 @@ mod tests {
 
         // ── Wrap: a batch straddling the end of the ring ──
         got.clear();
-        let big: Vec<f32> = (0..AUDIO_BUFFER_SAMPLES).map(|i| (i % 997) as f32).collect();
+        let big: Vec<f32> = (0..AUDIO_BUFFER_SAMPLES)
+            .map(|i| (i % 997) as f32)
+            .collect();
         // Two writes so the second necessarily wraps past the end.
         write_audio(&big[..AUDIO_BUFFER_SAMPLES - 500]);
         write_audio(&big[AUDIO_BUFFER_SAMPLES - 500..]);
@@ -687,7 +598,11 @@ mod tests {
         }
         let overrun = read_like_plugin(&mut lagging, &mut got);
         assert!(overrun, "lapping the reader must be detected, not silent");
-        assert_eq!(got.len(), AUDIO_BUFFER_SAMPLES, "resyncs to the newest buffer");
+        assert_eq!(
+            got.len(),
+            AUDIO_BUFFER_SAMPLES,
+            "resyncs to the newest buffer"
+        );
         assert_eq!(lagging, written_count(), "reader caught up to the writer");
 
         set_enabled(false);
