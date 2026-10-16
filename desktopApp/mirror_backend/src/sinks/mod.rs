@@ -37,10 +37,10 @@ pub fn push_audio(data: &[u8]) {
 
     // The OBS ring stores samples, so convert only when that sink is live.
     if obs_feed::is_enabled() {
-        let floats: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        // `as_chunks` gives fixed-size arrays, so no indexing is needed. The
+        // length is a multiple of 4 (checked above), so the remainder is empty.
+        let (chunks, _) = data.as_chunks::<4>();
+        let floats: Vec<f32> = chunks.iter().map(|c| f32::from_le_bytes(*c)).collect();
         obs_feed::write_audio(&floats);
     }
 }
