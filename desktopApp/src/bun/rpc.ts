@@ -20,6 +20,7 @@ import { native } from './native';
 const ZERO_METRICS: Metrics = {
   throughput_mbps: 0,
   decode_latency_ms: 0,
+  link_delay_ms: 0,
   fps_actual: 0,
   frames_dropped: 0,
   buffer_health: 0,

@@ -40,6 +40,12 @@ export interface Metrics {
    * needs a capture timestamp on the wire.
    */
   decode_latency_ms: number;
+  /**
+   * How much later than the best case recent frames arrived, measured from
+   * the phone's capture time. Rises when a queue between the phone and the
+   * screen is filling; not an absolute latency.
+   */
+  link_delay_ms: number;
   fps_actual: number;
   frames_dropped: number;
   /** 0..1, how full the decoder's ingress queue is. */

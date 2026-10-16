@@ -4,11 +4,11 @@ import { renderLogMessage } from '@/i18n/events';
 import type { LogEntry, LogLevel } from '@/types';
 
 const LEVEL_COLOUR: Record<LogLevel, string> = {
-  FATAL: 'text-red-400',
-  ERROR: 'text-red-400',
-  WARN: 'text-yellow-400',
-  SUCCESS: 'text-green-400',
-  INFO: 'text-blue-400',
+  FATAL: 'text-bad',
+  ERROR: 'text-bad',
+  WARN: 'text-warn',
+  SUCCESS: 'text-good',
+  INFO: 'text-muted',
 };
 
 interface LogItemProps {
@@ -16,7 +16,7 @@ interface LogItemProps {
 }
 
 /**
- * One line in the activity panel.
+ * One line in the activity history.
  *
  * The text comes from the event catalog keyed on `log.code`, not from
  * `log.message` — that is what makes these lines translatable. `log.message`
@@ -28,12 +28,12 @@ export const LogItem = memo(function LogItem({ log }: LogItemProps) {
   const message = renderLogMessage(log, locale);
 
   return (
-    <div className="flex gap-2 border-l border-gray-800 py-0.5 pl-3 font-mono text-[10px] hover:bg-white/5">
-      <span className="min-w-[80px] text-gray-600">{log.timestamp}</span>
-      <span className={`w-[70px] font-bold ${LEVEL_COLOUR[log.level] ?? 'text-blue-400'}`}>
-        [{log.level}]
+    <div className="flex gap-3 rounded px-1 py-0.5 text-sm hover:bg-paper">
+      <span className="num w-20 shrink-0 text-muted">{log.timestamp}</span>
+      <span className={`w-16 shrink-0 font-semibold ${LEVEL_COLOUR[log.level] ?? 'text-muted'}`}>
+        {log.level.toLowerCase()}
       </span>
-      <span className="break-all text-gray-300">{message}</span>
+      <span className="break-words">{message}</span>
     </div>
   );
 });

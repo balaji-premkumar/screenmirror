@@ -48,33 +48,33 @@ async function waitForBridge(timeoutMs = 10_000): Promise<boolean> {
 }
 
 const STATUS_ICON: Record<CheckStatus, JSX.Element> = {
-  pending: <div className="h-4 w-4 rounded-full border-2 border-gray-700" />,
+  pending: <div className="h-5 w-5 rounded-full border-2 border-line" />,
   checking: (
-    <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
+    <div className="h-5 w-5 rounded-full border-2 border-signal border-t-transparent motion-safe:animate-spin" />
   ),
   ok: (
-    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-green-500 text-[8px] font-black text-black">
+    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-good text-xs font-bold text-paper">
       ✓
     </div>
   ),
   warn: (
-    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-yellow-500/80 text-[8px] font-black text-black">
+    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-warn text-xs font-bold text-paper">
       !
     </div>
   ),
   error: (
-    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[8px] font-black text-white">
+    <div className="flex h-5 w-5 items-center justify-center rounded-full bg-bad text-xs font-bold text-paper">
       ✕
     </div>
   ),
 };
 
 const STATUS_COLOUR: Record<CheckStatus, string> = {
-  pending: 'text-gray-600',
-  checking: 'text-orange-400',
-  ok: 'text-green-400',
-  warn: 'text-yellow-400',
-  error: 'text-red-400',
+  pending: 'text-muted',
+  checking: 'text-muted',
+  ok: 'text-muted',
+  warn: 'text-warn',
+  error: 'text-bad',
 };
 
 /** Startup screen: reports what the app found, and offers to fix what it can. */
@@ -196,56 +196,47 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
     startupData?.obsInstalled === true &&
     startupData?.obsPluginInstalled === false;
 
+  // Everything is fine: there is nothing to read, so do not make the person
+  // click through. Any warning keeps the screen up until they have seen it.
+  const allClear = done && checks.every((c) => c.status === 'ok');
+  useEffect(() => {
+    if (!allClear || !startupData) return;
+    const timer = setTimeout(() => onComplete(startupData), 900);
+    return () => clearTimeout(timer);
+  }, [allClear, startupData, onComplete]);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#050608] p-6">
-      <div className="w-full max-w-lg">
-        <div className="mb-10 text-center">
-          <div className="mb-6 inline-flex items-center justify-center">
-            <div className="relative">
-              <div className="absolute inset-0 animate-pulse rounded-full bg-orange-500/20 blur-2xl" />
-              <LogoIcon />
-            </div>
-          </div>
-          <h1 className="mb-2 bg-gradient-to-r from-orange-400 to-orange-600 bg-clip-text text-3xl font-black uppercase tracking-tighter text-transparent">
-            {t('app.title')}
-          </h1>
-          <p className="font-mono text-[10px] uppercase tracking-[0.4em] text-gray-500">
-            {t('loader.initializing')}
-          </p>
+    <div className="flex min-h-screen items-center justify-center p-6">
+      <div className="w-full max-w-md">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <LogoIcon size={44} />
+          <h1 className="mt-4 text-3xl font-semibold tracking-tight">{t('app.title')}</h1>
+          <p className="mt-1 text-muted">{t('loader.initializing')}</p>
         </div>
 
-        <div className="mb-8 px-4">
-          <div className="h-[2px] overflow-hidden rounded-full bg-gray-800">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-orange-500 to-orange-400 transition-all duration-700 ease-out"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
+        <div
+          className="mb-6 h-1 overflow-hidden rounded-full bg-line"
+          role="progressbar"
+          aria-valuenow={progress}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div
+            className="h-full rounded-full bg-signal transition-[width] duration-500 ease-out"
+            style={{ width: `${progress}%` }}
+          />
         </div>
 
-        <div className="mb-6 space-y-1 rounded-2xl border border-gray-800/50 bg-[#0a0c10] p-6 shadow-2xl">
+        <ul className="mb-6 divide-y divide-line rounded-2xl border border-line bg-panel">
           {checks.map((check, i) => (
-            <div
-              key={check.labelKey}
-              className={`flex items-start gap-4 rounded-xl px-3 py-3 transition-all duration-300 ${
-                check.status === 'checking' ? 'bg-orange-500/5' : ''
-              }`}
-            >
-              <div className="mt-0.5 flex-shrink-0">{STATUS_ICON[check.status]}</div>
+            <li key={check.labelKey} className="flex items-start gap-4 px-5 py-4">
+              <div className="mt-0.5 shrink-0">{STATUS_ICON[check.status]}</div>
               <div className="min-w-0 flex-1">
-                <div
-                  className={`text-xs font-bold transition-colors duration-300 ${
-                    check.status === 'pending' ? 'text-gray-600' : 'text-gray-200'
-                  }`}
-                >
+                <div className={`font-semibold ${check.status === 'pending' ? 'text-muted' : ''}`}>
                   {t(check.labelKey)}
                 </div>
                 {check.detail && (
-                  <div
-                    className={`mt-0.5 truncate text-[10px] font-medium ${STATUS_COLOUR[check.status]}`}
-                  >
-                    {check.detail}
-                  </div>
+                  <div className={`mt-0.5 text-sm ${STATUS_COLOUR[check.status]}`}>{check.detail}</div>
                 )}
               </div>
 
@@ -254,33 +245,27 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
                   type="button"
                   onClick={installPlugin}
                   disabled={installing}
-                  className="flex-shrink-0 cursor-pointer rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[9px] font-black uppercase text-blue-400 transition-all hover:bg-blue-500/20"
+                  className="shrink-0 rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition-colors hover:border-ink/40 disabled:opacity-60"
                 >
                   {installing ? t('loader.installing') : t('loader.install')}
                 </button>
               )}
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
 
-        <div className="flex justify-center">
-          <button
-            type="button"
-            onClick={() => startupData && onComplete(startupData)}
-            disabled={!done}
-            className={`cursor-pointer rounded-xl px-12 py-3 text-xs font-black uppercase tracking-widest transition-all duration-500 ${
-              done
-                ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-black shadow-xl shadow-orange-900/30 hover:scale-[1.02] hover:shadow-orange-600/40 active:scale-[0.98]'
-                : 'cursor-not-allowed bg-gray-800 text-gray-600'
-            }`}
-          >
-            {done ? t('loader.enter') : t('loader.waiting')}
-          </button>
-        </div>
-
-        <p className="mt-8 text-center text-[9px] uppercase tracking-widest text-gray-700">
-          {t('app.version')}
-        </p>
+        {!allClear && (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={() => startupData && onComplete(startupData)}
+              disabled={!done}
+              className="rounded-xl bg-signal px-8 py-3 text-base font-semibold text-signal-ink transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:bg-line disabled:text-muted"
+            >
+              {done ? t('loader.enter') : t('loader.waiting')}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

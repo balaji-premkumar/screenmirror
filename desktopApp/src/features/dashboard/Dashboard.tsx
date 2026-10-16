@@ -1,10 +1,15 @@
-import type { StartupChecks } from '@/types';
-import { DeviceList } from './DeviceList';
+import LogoIcon from '@/components/ui/LogoIcon';
+import { useT } from '@/i18n';
+import { PlayerState, parseDevice, type StartupChecks } from '@/types';
+import { HealthPanel } from './HealthPanel';
+import { LinkStage } from './LinkStage';
 import { LogPanel } from './LogPanel';
-import { MetricsHeader } from './MetricsHeader';
+import { OtherDevices } from './DeviceList';
+import { QualityPanel } from './QualityPanel';
+import { SetupBanner } from './SetupBanner';
 import { SinkControls } from './SinkControls';
-import { StatusBar } from './StatusBar';
-import { StreamSettings } from './StreamSettings';
+import { assessStream, deriveStage, primaryDevice } from './stage';
+import { useSession } from './useSession';
 import { useStatusPolling } from './useStatusPolling';
 
 interface DashboardProps {
@@ -14,37 +19,70 @@ interface DashboardProps {
 /**
  * Layout for the main screen.
  *
- * Deliberately holds no state and makes no RPC calls of its own: polling lives
- * in {@link useStatusPolling} and each panel owns whatever local state it
- * needs. When this file was one 482-line component, adding a control meant
- * touching the same `useState` block and the same JSX tree as every other
- * feature.
+ * Polling lives in {@link useStatusPolling}, the person's actions in
+ * {@link useSession}, and the wording in `stage.ts`; this file only arranges
+ * them. The order on screen follows the order of the task: see what is
+ * happening, choose quality, check the stream is healthy.
  */
 export function Dashboard({ startupChecks }: DashboardProps) {
+  const t = useT();
   const status = useStatusPolling(startupChecks.driverOk);
+  const fps = status.metrics.fps_actual;
+  const session = useSession(status.isConnected, fps);
+
+  const stage = deriveStage({
+    devices: status.devices,
+    isConnected: status.isConnected,
+    fps,
+    startRequested: session.startRequested,
+  });
+  const device = primaryDevice(status.devices);
+  const others = status.devices.map(parseDevice).filter((d) => d.raw !== device?.raw);
+
+  const isMirroring = stage === 'mirroring';
+  const health = isMirroring ? assessStream(status.metrics, Number(session.config.fps)) : null;
 
   return (
-    <div className="min-h-screen bg-[#050608] p-6 font-sans text-gray-100">
-      <div className="mx-auto max-w-6xl space-y-6">
-        <StatusBar driverOk={status.driverOk} />
+    <div className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-5 py-6 sm:px-8">
+      <header className="flex items-center gap-2.5">
+        <LogoIcon />
+        <span className="text-lg font-semibold tracking-tight">{t('app.title')}</span>
+      </header>
 
-        <MetricsHeader metrics={status.metrics} isConnected={status.isConnected}>
+      {!status.driverOk && <SetupBanner />}
+
+      <LinkStage
+        stage={stage}
+        device={device}
+        fps={fps}
+        verdict={
+          health
+            ? {
+                level: health.level,
+                text: t(health.verdictKey),
+                hint: health.hintKey ? t(health.hintKey) : undefined,
+              }
+            : undefined
+        }
+        session={session}
+        sinks={
           <SinkControls
             startupChecks={startupChecks}
             obsRunning={status.obsRunning}
-            isConnected={status.isConnected}
-            playerState={status.playerState}
+            playerState={status.playerState ?? PlayerState.Stopped}
           />
-        </MetricsHeader>
+        }
+      />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div className="space-y-6 lg:col-span-2">
-            {status.isConnected && <StreamSettings />}
-            <DeviceList devices={status.devices} isConnected={status.isConnected} />
-          </div>
+      <div className="grid gap-10 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+        <QualityPanel session={session} isMirroring={isMirroring} />
+        <HealthPanel metrics={status.metrics} isMirroring={isMirroring} />
+      </div>
 
-          <LogPanel logs={status.logs} />
-        </div>
+      <OtherDevices devices={others} session={session} />
+
+      <div className="mt-auto">
+        <LogPanel logs={status.logs} />
       </div>
     </div>
   );

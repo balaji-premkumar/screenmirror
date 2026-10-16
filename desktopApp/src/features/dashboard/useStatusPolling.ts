@@ -35,6 +35,7 @@ const MAX_LOG_LINES = 300;
 const ZERO_METRICS: Metrics = {
   throughput_mbps: 0,
   decode_latency_ms: 0,
+  link_delay_ms: 0,
   fps_actual: 0,
   frames_dropped: 0,
   buffer_health: 0,
@@ -57,6 +58,7 @@ const METRIC_EPSILON = {
   throughput_mbps: 0.05,
   fps_actual: 0.5,
   buffer_health: 0.02,
+  link_delay_ms: 10,
 } as const;
 
 function metricsChanged(a: Metrics, b: Metrics): boolean {
@@ -65,7 +67,8 @@ function metricsChanged(a: Metrics, b: Metrics): boolean {
     Math.abs(a.fps_actual - b.fps_actual) > METRIC_EPSILON.fps_actual ||
     Math.abs(a.buffer_health - b.buffer_health) > METRIC_EPSILON.buffer_health ||
     a.frames_dropped !== b.frames_dropped ||
-    a.decode_latency_ms !== b.decode_latency_ms
+    a.decode_latency_ms !== b.decode_latency_ms ||
+    Math.abs(a.link_delay_ms - b.link_delay_ms) >= METRIC_EPSILON.link_delay_ms
   );
 }
 

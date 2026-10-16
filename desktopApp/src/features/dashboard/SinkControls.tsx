@@ -6,23 +6,20 @@ import { PlayerState, type StartupChecks } from '@/types';
 interface SinkControlsProps {
   startupChecks: StartupChecks;
   obsRunning: boolean;
-  isConnected: boolean;
   playerState: PlayerState;
 }
 
+const BUTTON =
+  'inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+
 /**
- * The two buttons that decide where the stream goes.
+ * The two places the picture can go besides the phone's own screen.
  *
  * These are the *only* two sinks. The app itself never opens an audio device:
  * sound reaches the machine either through the child ffplay process or through
  * the OBS shared-memory feed, and only after the user asks for it here.
  */
-export function SinkControls({
-  startupChecks,
-  obsRunning,
-  isConnected,
-  playerState,
-}: SinkControlsProps) {
+export function SinkControls({ startupChecks, obsRunning, playerState }: SinkControlsProps) {
   const t = useT();
   const [isObsActive, setIsObsActive] = useState(false);
   const [isTogglingPlayer, setIsTogglingPlayer] = useState(false);
@@ -30,8 +27,7 @@ export function SinkControls({
   // Sending frames is only meaningful when the plugin is installed *and* OBS
   // is running to read the shared memory. Otherwise it is an 8 MB memcpy per
   // frame into a buffer nobody maps.
-  const obsReady =
-    startupChecks.obsInstalled && startupChecks.obsPluginInstalled && obsRunning;
+  const obsReady = startupChecks.obsInstalled && startupChecks.obsPluginInstalled && obsRunning;
 
   // If OBS quits while the feed is on, stop writing.
   useEffect(() => {
@@ -86,53 +82,42 @@ export function SinkControls({
         ? t('player.stop')
         : t('player.play');
 
+  const playing = playerState === PlayerState.Playing;
+
   return (
     <>
+      {startupChecks.ffplayOk && (
+        <button
+          type="button"
+          onClick={togglePlayer}
+          disabled={isTogglingPlayer || playerState === PlayerState.Starting}
+          aria-pressed={playing}
+          title={playerState === PlayerState.Stopped ? t('player.tooltip.start') : t('player.tooltip.stop')}
+          className={`${BUTTON} ${
+            playing
+              ? 'border-signal bg-signal/10 text-signal'
+              : 'border-line bg-panel text-ink hover:border-ink/40'
+          }`}
+        >
+          {playerLabel}
+        </button>
+      )}
+
       {startupChecks.obsInstalled && (
         <button
           type="button"
           onClick={toggleObs}
           disabled={!obsReady}
+          aria-pressed={isObsActive}
           title={obsTooltip}
-          className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-[10px] font-black uppercase shadow-xl transition-all active:scale-[0.98] ${
-            !obsReady
-              ? 'cursor-not-allowed border-gray-800 bg-gray-900 text-gray-600'
-              : isObsActive
-                ? 'cursor-pointer border-blue-400 bg-blue-600 text-white shadow-blue-900/20'
-                : 'cursor-pointer border-gray-700 bg-gray-800 text-gray-400'
+          className={`${BUTTON} ${
+            isObsActive
+              ? 'border-signal bg-signal/10 text-signal'
+              : 'border-line bg-panel text-ink hover:border-ink/40'
           }`}
         >
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              isObsActive ? 'animate-pulse bg-white' : obsReady ? 'bg-blue-400' : 'bg-gray-700'
-            }`}
-          />
+          {isObsActive && <span className="h-2 w-2 rounded-full bg-signal motion-safe:animate-pulse" />}
           {obsLabel}
-        </button>
-      )}
-
-      {isConnected && startupChecks.ffplayOk && (
-        <button
-          type="button"
-          onClick={togglePlayer}
-          disabled={isTogglingPlayer || playerState === PlayerState.Starting}
-          title={
-            playerState === PlayerState.Stopped
-              ? t('player.tooltip.start')
-              : t('player.tooltip.stop')
-          }
-          className={`flex items-center gap-2 rounded-xl px-6 py-3 text-[10px] font-black uppercase text-white shadow-xl transition-all active:scale-[0.98] ${
-            playerState === PlayerState.Playing
-              ? 'cursor-pointer bg-red-600 shadow-red-900/20 hover:bg-red-500'
-              : 'cursor-pointer bg-orange-600 shadow-orange-900/20 hover:bg-orange-500'
-          } ${
-            isTogglingPlayer || playerState === PlayerState.Starting
-              ? 'cursor-wait opacity-60'
-              : ''
-          }`}
-        >
-          {playerState === PlayerState.Playing ? '■' : '▶'}
-          {playerLabel}
         </button>
       )}
     </>
