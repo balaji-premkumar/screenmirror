@@ -65,9 +65,14 @@ jobs:
         working-directory: mobileApp
         run: |
           apk=build/app/outputs/flutter-apk/app-release.apk
-          if unzip -p "$apk" META-INF/*.RSA 2>/dev/null \
-             | keytool -printcert 2>/dev/null \
-             | grep -q "CN=Android Debug"; then
+          # apksigner reads every signature scheme. The check this replaces
+          # looked for META-INF/*.RSA, which only exists in v1 (jar) signatures;
+          # a modern APK has none, so it reported "not debug-signed" for a
+          # debug-signed build.
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          certs=$("$apksigner" verify --print-certs "$apk")
+          echo "$certs" | head -3
+          if echo "$certs" | grep -q "CN=Android Debug"; then
             if [ "${{ inputs.require_release_signing }}" = "true" ]; then
               echo "::error::The APK is signed with the debug key. Configure android/key.properties."
               exit 1
