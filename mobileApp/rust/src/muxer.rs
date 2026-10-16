@@ -32,11 +32,16 @@ pub fn contains_csd(data: &[u8]) -> bool {
 struct QueuedVideo {
     data: Vec<u8>,
     is_csd: bool,
+    is_key: bool,
 }
 
 struct QueueInner {
     video: VecDeque<QueuedVideo>,
     audio: VecDeque<Vec<u8>>,
+    /// Set after a drop left no keyframe to resume from. Until one arrives,
+    /// delta frames are discarded: sending them would only paint garbage on
+    /// the desktop, which has lost the frames they reference.
+    need_key: bool,
     closed: bool,
 }
 
@@ -53,7 +58,10 @@ pub struct UsbQueues {
 
 /// ~1.5 s of video at 120 fps. If USB falls this far behind, the link is
 /// effectively down and dropping (keeping CSD) is the right call.
-const VIDEO_QUEUE_CAP: usize = 180;
+/// Video frames held before the queue starts shedding load. Kept small on
+/// purpose: every queued frame is latency, and a stream that is behind should
+/// jump to the present rather than replay the past (8 frames ≈ 133 ms at 60 fps).
+const VIDEO_QUEUE_CAP: usize = 8;
 /// ~1.3 s of audio at 48 kHz / 1024-sample blocks.
 const AUDIO_QUEUE_CAP: usize = 64;
 
@@ -63,23 +71,63 @@ impl UsbQueues {
             inner: Mutex::new(QueueInner {
                 video: VecDeque::with_capacity(VIDEO_QUEUE_CAP),
                 audio: VecDeque::with_capacity(AUDIO_QUEUE_CAP),
+                need_key: false,
                 closed: false,
             }),
             cond: Condvar::new(),
         })
     }
 
-    fn push_video(&self, pkt: Vec<u8>, is_csd: bool) {
+    fn push_video(&self, pkt: Vec<u8>, info: hevc::PacketInfo) {
+        let (is_csd, is_key) = (info.has_parameter_sets, info.has_keyframe);
         let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        while q.video.len() >= VIDEO_QUEUE_CAP {
-            // Drop the oldest non-CSD packet.
-            let victim = q.video.iter().position(|p| !p.is_csd).unwrap_or(0);
-            if let Some(dropped) = q.video.remove(victim) {
-                Muxer::release_buffer(dropped.data);
+
+        if q.need_key {
+            if is_key {
+                q.need_key = false;
+            } else if !is_csd {
+                Muxer::release_buffer(pkt);
+                DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
+                return;
             }
-            DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
         }
-        q.video.push_back(QueuedVideo { data: pkt, is_csd });
+
+        if q.video.len() >= VIDEO_QUEUE_CAP {
+            // Dropping one delta frame corrupts every frame after it until the
+            // next keyframe, so shed the whole stale run instead: everything
+            // before the newest keyframe (the incoming packet counts). Bare
+            // parameter sets survive; the decoder needs them to restart.
+            let boundary = if is_key {
+                q.video.len()
+            } else {
+                q.video
+                    .iter()
+                    .rposition(|p| p.is_key)
+                    .unwrap_or(q.video.len())
+            };
+            if boundary == q.video.len() && !is_key {
+                q.need_key = true; // nothing to resume from yet
+            }
+            let mut idx = 0;
+            let mut dropped = 0;
+            q.video.retain(|p| {
+                let keep = idx >= boundary || (p.is_csd && !p.is_key);
+                idx += 1;
+                dropped += u64::from(!keep);
+                keep
+            });
+            DROPPED_VIDEO_FRAMES.fetch_add(dropped, Ordering::Relaxed);
+            if q.need_key && !is_csd {
+                // The incoming delta frame is as unusable as the ones just shed.
+                DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        q.video.push_back(QueuedVideo {
+            data: pkt,
+            is_csd,
+            is_key,
+        });
         drop(q);
         self.cond.notify_one();
     }
@@ -151,9 +199,9 @@ impl Muxer {
     pub fn push_video(&mut self, h265_data: &[u8]) {
         // Scanned on the raw payload before framing, so the queue never has
         // to look at packet bytes again.
-        let is_csd = contains_csd(h265_data);
+        let info = hevc::scan_packet(h265_data);
         let frame = Self::frame_packet_pooled(PacketType::Video, h265_data);
-        self.queues.push_video(frame, is_csd);
+        self.queues.push_video(frame, info);
     }
 
     /// Push raw PCM (f32 LE mono 48 kHz) audio data into the mux pipeline.
@@ -243,6 +291,44 @@ mod tests {
             PopResult::Packet(p) => assert!(contains_csd(&p[HEADER_SIZE..])),
             _ => panic!("expected packet"),
         }
+    }
+
+    fn nal(t: u8) -> Vec<u8> {
+        vec![0, 0, 0, 1, t << 1, 1]
+    }
+
+    fn drain(q: &UsbQueues) -> Vec<u8> {
+        let mut types = Vec::new();
+        while let PopResult::Packet(p) = q.pop_next(Duration::from_millis(1)) {
+            types.push(p[HEADER_SIZE + 4] >> 1);
+        }
+        types
+    }
+
+    #[test]
+    fn overflow_sheds_the_stale_run_up_to_the_newest_keyframe() {
+        let q = UsbQueues::new();
+        let mut m = Muxer::new(q.clone());
+        m.push_video(&nal(19)); // old IDR
+        for _ in 0..VIDEO_QUEUE_CAP - 2 {
+            m.push_video(&nal(1));
+        }
+        m.push_video(&nal(19)); // newest IDR
+        m.push_video(&nal(1)); // overflow: drop everything before the newest IDR
+        assert_eq!(drain(&q), vec![19, 1]);
+    }
+
+    #[test]
+    fn no_keyframe_to_resume_from_discards_deltas_until_one_arrives() {
+        let q = UsbQueues::new();
+        let mut m = Muxer::new(q.clone());
+        for _ in 0..VIDEO_QUEUE_CAP + 1 {
+            m.push_video(&nal(1));
+        }
+        m.push_video(&nal(1)); // still waiting for a keyframe
+        m.push_video(&nal(19));
+        m.push_video(&nal(1));
+        assert_eq!(drain(&q), vec![19, 1]);
     }
 
     #[test]

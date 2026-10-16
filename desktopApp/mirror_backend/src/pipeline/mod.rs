@@ -40,8 +40,15 @@ struct Queued {
 
 /// Bounded FIFO of encoded video packets with keyframe-aware overflow
 /// handling and a blocking consumer side.
+struct QueueState {
+    packets: VecDeque<Queued>,
+    /// Set after a drop left no keyframe to resume from. Until one arrives,
+    /// delta frames are discarded rather than decoded against missing references.
+    need_key: bool,
+}
+
 pub struct VideoQueue {
-    inner: Mutex<VecDeque<Queued>>,
+    inner: Mutex<QueueState>,
     cond: Condvar,
     cap: usize,
 }
@@ -49,7 +56,10 @@ pub struct VideoQueue {
 impl VideoQueue {
     pub fn new(cap: usize) -> Self {
         VideoQueue {
-            inner: Mutex::new(VecDeque::with_capacity(cap)),
+            inner: Mutex::new(QueueState {
+                packets: VecDeque::with_capacity(cap),
+                need_key: false,
+            }),
             cond: Condvar::new(),
             cap,
         }
@@ -58,43 +68,72 @@ impl VideoQueue {
     /// Push a packet. Never blocks. Returns the number of packets dropped
     /// to make room (0 in the common case).
     pub fn push(&self, pkt: Vec<u8>) -> usize {
-        // Scanned once here, outside the lock. The old code re-scanned every
-        // queued packet's full payload on each overflow push, holding the
-        // mutex the whole time — hundreds of MB/s of scanning on the USB
-        // reader thread exactly when the pipeline was already struggling.
         let info = scan_packet(&pkt);
 
         let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut dropped = 0;
-        while q.len() >= self.cap {
-            // Prefer dropping the oldest packet that is neither CSD nor a
-            // keyframe; if everything is essential, drop the oldest anyway.
-            let victim = q.iter().position(|p| !p.info.is_essential()).unwrap_or(0);
-            q.remove(victim);
-            dropped += 1;
+
+        if q.need_key {
+            if info.has_keyframe {
+                q.need_key = false;
+            } else if !info.has_parameter_sets {
+                return 1;
+            }
         }
-        q.push_back(Queued { data: pkt, info });
+
+        if q.packets.len() >= self.cap {
+            // Dropping one delta frame corrupts every frame after it until the
+            // next keyframe, so shed the whole stale run instead: everything
+            // before the newest keyframe (the incoming packet counts). Bare
+            // parameter sets survive; the decoder needs them to restart.
+            let boundary = if info.has_keyframe {
+                q.packets.len()
+            } else {
+                q.packets
+                    .iter()
+                    .rposition(|p| p.info.has_keyframe)
+                    .unwrap_or(q.packets.len())
+            };
+            if boundary == q.packets.len() && !info.has_keyframe {
+                q.need_key = true; // nothing to resume from yet
+            }
+            let mut idx = 0;
+            q.packets.retain(|p| {
+                let keep = idx >= boundary || (p.info.has_parameter_sets && !p.info.has_keyframe);
+                idx += 1;
+                dropped += usize::from(!keep);
+                keep
+            });
+            if q.need_key && !info.has_parameter_sets {
+                // The incoming delta frame is as unusable as the ones just shed.
+                return dropped + 1;
+            }
+        }
+        q.packets.push_back(Queued { data: pkt, info });
         drop(q);
         self.cond.notify_one();
         dropped
     }
 
-    /// Block until a packet is available or the timeout elapses.
     pub fn pop_timeout(&self, timeout: Duration) -> Option<Vec<u8>> {
         let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if q.is_empty() {
+        if q.packets.is_empty() {
             let (guard, _res) = self
                 .cond
                 .wait_timeout(q, timeout)
                 .unwrap_or_else(|e| e.into_inner());
             q = guard;
         }
-        q.pop_front().map(|p| p.data)
+        q.packets.pop_front().map(|p| p.data)
     }
 
     /// How many packets are waiting. Reported to the interface as buffer depth.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .packets
+            .len()
     }
 
     /// Whether the decoder has caught up with the receiver.
@@ -108,7 +147,9 @@ impl VideoQueue {
     }
 
     pub fn clear(&self) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        q.packets.clear();
+        q.need_key = false;
     }
 }
 
@@ -161,11 +202,43 @@ mod tests {
         q.push(nal(1));
         q.push(nal(1));
         q.push(nal(1));
-        let dropped = q.push(nal(1)); // overflow
-        assert_eq!(dropped, 1);
+        let dropped = q.push(nal(1)); // overflow: three deltas shed, incoming refused
+        assert_eq!(dropped, 4);
         // CSD packet still at the front
         let first = q.pop_timeout(Duration::from_millis(10)).unwrap();
         assert!(scan_packet(&first).has_parameter_sets);
+    }
+
+    fn drain_types(q: &VideoQueue) -> Vec<u8> {
+        let mut types = Vec::new();
+        while let Some(p) = q.pop_timeout(Duration::from_millis(1)) {
+            types.push(p[4] >> 1);
+        }
+        types
+    }
+
+    #[test]
+    fn overflow_sheds_the_stale_run_up_to_the_newest_keyframe() {
+        let q = VideoQueue::new(4);
+        q.push(nal(19)); // old IDR
+        q.push(nal(1));
+        q.push(nal(19)); // newest IDR
+        q.push(nal(1));
+        let dropped = q.push(nal(1)); // overflow
+        assert_eq!(dropped, 2);
+        assert_eq!(drain_types(&q), vec![19, 1, 1]);
+    }
+
+    #[test]
+    fn no_keyframe_to_resume_from_discards_deltas_until_one_arrives() {
+        let q = VideoQueue::new(2);
+        q.push(nal(1));
+        q.push(nal(1));
+        assert_eq!(q.push(nal(1)), 3); // sheds two, refuses the incoming one
+        assert_eq!(q.push(nal(1)), 1); // still waiting for a keyframe
+        q.push(nal(19));
+        q.push(nal(1));
+        assert_eq!(drain_types(&q), vec![19, 1]);
     }
 
     #[test]

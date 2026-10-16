@@ -267,6 +267,19 @@ class MirrorForegroundService : Service() {
 
         try {
             mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+            // Constant bitrate keeps the USB writer fed at an even rate. The
+            // usual VBR default spikes on scene changes, and those spikes are
+            // what overflow the send queue. Not every encoder offers it.
+            val supportsCbr = mediaCodec?.codecInfo
+                ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+                ?.encoderCapabilities
+                ?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true
+            if (supportsCbr) {
+                format.setInteger(
+                    MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                )
+            }
             mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
             android.util.Log.e("MirrorService", "Encoder configure failed (${e.message}) — retrying without rate hints")

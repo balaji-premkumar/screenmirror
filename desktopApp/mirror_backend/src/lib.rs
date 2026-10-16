@@ -100,10 +100,11 @@ pub fn now_nanos() -> u64 {
 
 /// Encoded-video ingress queue (USB thread → decoder thread).
 ///
-/// 32 packets ≈ 250 ms at 120 fps — enough to absorb scheduler jitter without
-/// adding perceptible latency.
+/// 6 packets ≈ 100 ms at 60 fps — enough to absorb scheduler jitter without
+/// adding perceptible latency. When it overflows the queue sheds the stale run
+/// up to the newest keyframe (see `VideoQueue::push`).
 pub static VIDEO_QUEUE: Lazy<Arc<pipeline::VideoQueue>> =
-    Lazy::new(|| Arc::new(pipeline::VideoQueue::new(32)));
+    Lazy::new(|| Arc::new(pipeline::VideoQueue::new(6)));
 
 /// Triple-buffer shared-memory writer for the OBS plugin. Set once at init.
 static TRIPLE_BUFFER: Lazy<Mutex<Option<Arc<sinks::shared_mem::TripleBufferManager>>>> =
