@@ -1,8 +1,7 @@
-gradle-wrapper.jar
+# The Gradle wrapper is committed on purpose: CI and contributors must
+# build with the exact Gradle version this project was verified against.
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/

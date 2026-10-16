@@ -1,5 +1,5 @@
 name: stream_mobile_app
-description: "A new Flutter project."
+description: "Companion app that streams this phone's screen and audio to a computer over USB."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -30,6 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Ships the Material and Cupertino translations. Without it a non-English
+  # phone gets translated app text inside English system widgets.
+  flutter_localizations:
+    sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -54,6 +58,9 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  # Runs `gen-l10n` as part of every build, regenerating
+  # lib/src/l10n/generated/ from the .arb files.
+  generate: true
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

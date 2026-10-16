@@ -1,0 +1,40 @@
+# Workspace root for everything that builds for the host machine.
+#
+# `mobileApp/rust` is deliberately excluded. It cross-compiles to Android via
+# cargo-ndk, and a shared workspace would drag `mirror_backend` — and with it
+# ffmpeg-sys, which does not cross-compile to Android — into every mobile
+# build. It declares its own `[workspace]` and reaches the shared crates by
+# path, which works across workspace boundaries.
+[workspace]
+resolver = "2"
+members = [
+    "packages/mirror-protocol",
+    "packages/mirror-i18n",
+    "desktopApp/mirror_backend",
+]
+exclude = ["mobileApp/rust"]
+
+# Versions for dependencies used by more than one crate in this workspace.
+# Members write `foo = { workspace = true }` so an upgrade happens once.
+[workspace.dependencies]
+mirror-protocol = { path = "packages/mirror-protocol" }
+mirror-i18n = { path = "packages/mirror-i18n" }
+anyhow = "1.0"
+byteorder = "1.5"
+chrono = "0.4"
+libc = "0.2"
+memchr = "2"
+once_cell = "1.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/balaji-premkumar/screenmirror"
+
+[profile.release]
+# The decode and remux paths are the hot loops; LTO and a single codegen unit
+# are worth the longer build here.
+lto = "thin"
+codegen-units = 1

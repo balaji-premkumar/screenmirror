@@ -599,6 +599,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-protocol"
+version = "1.0.0"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "ndk"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -812,6 +819,7 @@ dependencies = [
  "flutter_rust_bridge",
  "jni",
  "libc",
+ "mirror-protocol",
  "ndk",
  "ndk-sys",
  "once_cell",

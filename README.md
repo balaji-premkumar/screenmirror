@@ -14,7 +14,7 @@ It uses the **Android Open Accessory (AOA) protocol** rather than ADB. That mean
 
 ## ✨ Features
 
-- **🔗 No ADB, no developer mode** — pure USB-AOA. USB permissions are configured on first launch (udev on Linux, WinUSB on Windows).
+- **🔗 No ADB, no developer mode** — pure USB-AOA. USB permissions are configured on first launch (udev on Linux, WinUSB on Windows, nothing on macOS). On Windows, plug the phone in first: the one-time setup binds the driver to your phone's own USB mode as well as to the accessory mode it switches into.
 - **🚀 Hardware-accelerated decode** — FFmpeg with VAAPI/NVDEC (Linux), D3D11VA/DXVA2 (Windows), VideoToolbox (macOS), and a multithreaded software fallback.
 - **🔊 System audio** — real-time game/media audio via Android `AudioPlaybackCapture` (48 kHz f32 mono). Captures what the device is *playing*, not the microphone.
 - **🎥 OBS Studio integration** — a shared-memory source plugin, so no capture card and no window-capture round trip.
@@ -53,18 +53,53 @@ AudioPlaybackCapture (f32 48kHz) ─────┤
                                                    └─→ decoder ─→ OBS shared memory
 ```
 
-### Desktop Receiver (`/desktopApp`)
-- **Frontend**: React 18 + Tailwind CSS on [Electrobun](https://electrobun.dev/) (Bun-based native shell).
-- **Core (`mirror_backend`, Rust)**: packet demuxing, transport queues, FFmpeg HEVC decoding, and the Matroska remuxer that feeds `ffplay`.
-- **Shared memory**: triple-buffered with a per-slot seqlock for the OBS plugin; a separate ring buffer carries audio.
+### Repository layout
 
-### Mobile Companion (`/mobileApp`)
-- **Frontend**: Flutter.
-- **Native core (Rust)**: frame muxing, non-blocking transport queues, AOA session management.
-- **Capture**: `MediaProjection` + `MediaCodec` for HEVC, `AudioPlaybackCapture` for system audio.
+```
+packages/
+  mirror-protocol/   the wire format and HEVC helpers, shared by both ends
+  mirror-i18n/       event codes and locale catalogs, shared by both ends
+desktopApp/
+  mirror_backend/    Rust: ffi/ pipeline/ sinks/ platform/ telemetry/
+  obs_plugin/        C: the OBS source that maps the shared memory
+  src/               TypeScript: the Electrobun shell and the React UI
+mobileApp/
+  rust/              Rust: capture muxing and the USB write loop
+  lib/               Dart: app/ features/ services/ models/ l10n/
+  android/           Kotlin: MediaProjection, MediaCodec, the service
+docs/                architecture notes and decision records
+tools/               release packaging
+```
 
-### OBS Plugin (`/desktopApp/obs_plugin`)
-C source building on Linux, Windows and macOS. Reads the shared-memory segments directly.
+The two `packages/` crates are the only code both sides share, and each exists
+because duplicating it had already caused a problem — the frame format was
+written in one place and parsed in another with no compiler link between them,
+and the HEVC bitstream walker had four copies that had already drifted.
+
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has the detail, including a
+table mapping "I want to add X" to the directory it belongs in.
+**[docs/adr/](docs/adr/)** records the decisions that were not obvious.
+
+---
+
+## 📦 Download a build
+
+Every push builds installable packages for all three systems. They are not published anywhere yet: open the workflow run, and the packages are listed under **Artifacts** at the bottom of the page (kept for 14 days).
+
+1. Open the [**Build Desktop App**](https://github.com/balaji-premkumar/screenmirror/actions/workflows/desktop.yml) and [**Build Mobile App**](https://github.com/balaji-premkumar/screenmirror/actions/workflows/mobile.yml) workflows.
+2. Pick the latest run for your branch.
+3. Download the package for your system. You need to be signed in to GitHub to download artifacts.
+
+| Artifact | For | Notes |
+| :--- | :--- | :--- |
+| `ScreenMirror-linux-x64` | Linux desktop | Extract the `…-Setup.tar.gz` and run the installer. Needs the FFmpeg runtime libraries and `ffplay` from your package manager; the package is built on Ubuntu, so other distributions may need a different FFmpeg version. |
+| `ScreenMirror-windows-x64` | Windows desktop | Bundles FFmpeg and `ffplay`. The first run asks for administrator approval once to install the USB driver; **plug your phone in before you approve it**. |
+| `ScreenMirror-macos-arm64` | Apple-silicon Mac | Needs `brew install ffmpeg`. Not signed or notarized yet, so macOS will warn the first time: right-click the app and choose Open. |
+| `ScreenMirror-android-debug-signed` | Android phone | Signed with the public debug key, so it is for trying the app only. Allow installs from unknown sources. |
+
+The phone app and the desktop app must come from the **same build**. The wire format changed in this version (frames now carry a capture timestamp), and an older phone app will not pair with a newer desktop app.
+
+Tagged releases build the same packages on the `stable` channel, require a real Android signing key, and attach everything to a GitHub release. Publishing to package registries is not set up yet.
 
 ---
 
@@ -102,9 +137,14 @@ cd screenmirror
 ```bash
 cd desktopApp
 bun install
-bun run build:rust   # compiles the Rust backend
+bun run build:all    # Rust backend, OBS plugin, native bundle, renderer
 bun run dev          # starts the app in dev mode
 ```
+
+`build:all` needs `libobs-dev` for the OBS plugin step. Without it, use
+`bun run build:rust && bun run build:bundle && bun run build:vite` — the
+desktop app runs fine without the plugin, and the *Send to OBS* control simply
+stays unavailable.
 
 #### 3. Mobile (companion)
 ```bash
@@ -134,12 +174,14 @@ A debug-signed APK must not be distributed — the debug key is public.
 
 ## 📖 Usage
 
-1. **Launch** the ScreenMirror desktop app.
-2. **Connect** your Android device by USB.
-3. **Open** the ScreenMirror companion app on the phone.
-4. **Authorize** the USB accessory and screen-recording prompts. Grant the microphone permission too if you want sound — it gates `AudioPlaybackCapture`, which records device output rather than the mic.
-5. **Press Start** in the desktop dashboard to begin capture.
-6. **Choose a sink**: *Play Video + Audio* for a player window, or *Send to OBS* if OBS is running with the plugin installed.
+1. **Launch** the ScreenMirror desktop app. The first launch checks USB access, the player and OBS, then opens the dashboard by itself when everything is fine.
+2. **Plug in** your Android phone with a USB cable. There is nothing to turn on first: no developer options and no USB debugging.
+3. **Connect** when the dashboard shows your phone. If the phone asks which app to open, choose ScreenMirror.
+4. **Pick a quality** preset (Light, Balanced, Sharp or Maximum), or open *Fine-tune* for resolution, frame rate, bitrate and audio source.
+5. **Press Start mirroring**, then approve the screen-sharing prompt on the phone. Grant the microphone permission too if you want sound: it gates `AudioPlaybackCapture`, which records device output rather than the mic.
+6. **Watch**: *Watch on this computer* opens a player window, and *Send to OBS* feeds the OBS source if OBS is running with the plugin installed.
+
+While it runs, the dashboard says in one line whether the stream is smooth, uneven, lagging or dropping frames, with the numbers underneath (frame rate, data rate, extra delay) and a suggestion when it is not smooth.
 
 ---
 
@@ -147,7 +189,9 @@ A debug-signed APK must not be distributed — the debug key is public.
 
 | Symptom | Likely cause |
 | :--- | :--- |
-| Phone never appears | udev rules not installed (Linux) or WinUSB not bound (Windows). Use **Fix USB Permissions** in the dashboard. |
+| Phone never appears | USB access not set up. Use **Allow USB access** in the dashboard: it installs a udev rule on Linux, or binds WinUSB on Windows (plug the phone in first). macOS needs nothing. After updating, the dashboard may ask once more, because the Linux rule is versioned and the Windows driver now also covers the phone's own USB mode. |
+| Phone and desktop will not pair | The phone app and desktop app are different versions. Install both from the same build. |
+| Video stutters while gaming | Try the **Light** preset, a different cable or USB port, and watch *Extra delay*: if it climbs, the link or the phone cannot keep up. |
 | Player button missing | `ffplay` not found on `PATH` or in `desktopApp/bin/`. |
 | *OBS: Not Running* / *Plugin Missing* | Start OBS, or install the plugin from the loader screen. |
 | Video but no sound | Microphone permission denied on the phone — `AudioPlaybackCapture` needs it even though it captures device output. |
@@ -159,20 +203,23 @@ Desktop logs are written to `~/.mirror_stream/logs/mirror_rust.log.json`.
 
 ## 🤝 Contributing
 
-Contributions welcome. [ISSUES.md](ISSUES.md) tracks the roadmap and known bottlenecks; GitHub Issues tracks actionable work.
+Contributions welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the
+setup, the checks, and where things go.
 
-1. Fork the project.
-2. Create your branch (`git checkout -b feat/amazing-feature`).
-3. Commit (`git commit -m 'feat: add amazing feature'`).
-4. Push and open a Pull Request.
-
-Please run the test suites before opening a PR:
+The short version:
 
 ```bash
-cd desktopApp/mirror_backend && cargo test --release
-cd mobileApp/rust && cargo test
-cd mobileApp && flutter analyze
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd mobileApp/rust && cargo test)
+(cd desktopApp && bun run typecheck)
+(cd mobileApp && flutter analyze && flutter test)
 ```
+
+Adding a language does not require touching any of that — see
+**[docs/i18n.md](docs/i18n.md)**. It is four JSON/ARB/XML files, and the tests
+will tell you if you missed a string.
 
 ---
 
@@ -186,6 +233,8 @@ ScreenMirror itself is MIT, but it builds against FFmpeg, which is **LGPL 2.1+**
 
 - The Rust backend **dynamically links** the system FFmpeg libraries, and `ffplay` is launched as a **separate process**. Neither imposes GPL terms on this project.
 - If you redistribute a build that **statically links** FFmpeg, or that bundles a GPL-configured FFmpeg, those terms apply to what you ship. Check before packaging binaries.
+
+Windows builds also bundle `wdi-simple.exe` from [libwdi](https://github.com/pbatard/libwdi) (**LGPL 3**), which installs the WinUSB driver. It runs as a separate process and is built unmodified from the upstream `v1.5.1` source in CI; the corresponding source is that tag.
 
 The OBS plugin links `libobs` (GPL 2.0+), so that plugin binary is subject to GPL terms when distributed. The plugin is a separate artifact from the desktop app.
 

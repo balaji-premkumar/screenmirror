@@ -1,0 +1,164 @@
+#!/usr/bin/env bun
+/**
+ * Copies the freshly built native libraries into `bin/`, where the packaged
+ * app looks for them.
+ *
+ * This replaces `bundle.sh`. The shell version only ran on a POSIX shell, so
+ * the Windows half of the build matrix had no way to bundle anything — it
+ * built `mirror_backend.dll` and then left it in `target/release`. Bun is
+ * already required to build this app, so a Bun script runs everywhere the
+ * build does.
+ */
+
+import { copyFile, mkdir, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const desktopRoot = resolve(scriptDir, '..');
+const repoRoot = resolve(desktopRoot, '..');
+const binDir = join(desktopRoot, 'bin');
+
+/** Cargo puts workspace output in the workspace root's `target/`, not the crate's. */
+const cargoRelease = join(repoRoot, 'target', 'release');
+
+/** What the Rust backend is called on each platform. */
+const BACKEND_NAME: Record<string, string> = {
+  linux: 'libmirror_backend.so',
+  darwin: 'libmirror_backend.dylib',
+  win32: 'mirror_backend.dll',
+};
+
+/** What the OBS plugin is called on each platform. */
+const PLUGIN_NAME: Record<string, string> = {
+  linux: 'mirror-source.so',
+  darwin: 'mirror-source.so',
+  win32: 'mirror-source.dll',
+};
+
+interface Artifact {
+  label: string;
+  /** Candidate paths, tried in order. */
+  from: string[];
+  to: string;
+  /** Whether the build should fail if none of the candidates exist. */
+  required: boolean;
+}
+
+function artifacts(): Artifact[] {
+  const platform = process.platform;
+  const backend = BACKEND_NAME[platform];
+  const plugin = PLUGIN_NAME[platform];
+
+  if (!backend) {
+    throw new Error(`No native backend is built for platform "${platform}".`);
+  }
+
+  const pluginBuild = join(desktopRoot, 'obs_plugin', 'build');
+
+  return [
+    {
+      label: 'Rust backend',
+      from: [join(cargoRelease, backend)],
+      to: join(binDir, backend),
+      required: true,
+    },
+    {
+      label: 'OBS plugin',
+      // Single-config generators put it directly in build/; MSVC adds a
+      // per-configuration subdirectory.
+      from: [
+        join(pluginBuild, plugin),
+        join(pluginBuild, 'Release', plugin),
+        join(pluginBuild, 'RelWithDebInfo', plugin),
+      ],
+      to: join(binDir, plugin),
+      // The OBS plugin is optional: the app runs fine without OBS installed,
+      // and requiring libobs headers to build the desktop app at all would be
+      // a needless barrier.
+      required: false,
+    },
+    ...(process.platform === 'win32'
+      ? [
+          {
+            label: 'WinUSB installer (wdi-simple)',
+            // Built from libwdi by the Windows CI job; see desktop.yml. Without
+            // it the app falls back to an unsigned INF that Windows rejects.
+            from: [join(desktopRoot, 'wdi', 'wdi-simple.exe')],
+            to: join(binDir, 'wdi-simple.exe'),
+            required: false,
+          },
+        ]
+      : []),
+  ];
+}
+
+/**
+ * Windows has no system FFmpeg, and Linux distributions rarely ship the 8.1 the
+ * backend links against, so those two packages carry their own: the shared
+ * libraries, and on Windows `ffplay.exe` for the player. CI points FFMPEG_DIR
+ * at the build it compiled against, so what ships is exactly what the backend
+ * was linked with. Linux libraries are found through the backend's `$ORIGIN`
+ * run path; `ffplay` there is the system one. macOS uses Homebrew's ffmpeg@8.
+ */
+async function bundleFfmpegRuntime() {
+  const dir = process.env.FFMPEG_DIR;
+  if (!dir || (process.platform !== 'win32' && process.platform !== 'linux')) return;
+
+  const windows = process.platform === 'win32';
+  const source = join(dir, windows ? 'bin' : 'lib');
+  if (!existsSync(source)) {
+    console.warn(`- FFMPEG_DIR has no ${windows ? 'bin' : 'lib'}/ (${source}); not bundling FFmpeg.`);
+    return;
+  }
+
+  // Windows: every DLL plus ffplay. Linux: only the versioned sonames
+  // (libavcodec.so.62), not the dev symlink chain that would triple the size.
+  const wanted = (file: string) =>
+    windows
+      ? file.toLowerCase().endsWith('.dll') || file.toLowerCase() === 'ffplay.exe'
+      : /^lib.+\.so\.\d+$/.test(file);
+
+  let copied = 0;
+  for (const file of await readdir(source)) {
+    if (wanted(file)) {
+      await copyFile(join(source, file), join(binDir, file));
+      copied += 1;
+    }
+  }
+  console.log(`✓ FFmpeg runtime (${copied} files) → ${binDir}`);
+}
+
+async function main() {
+  await mkdir(binDir, { recursive: true });
+
+  let missingRequired = false;
+
+  for (const artifact of artifacts()) {
+    const source = artifact.from.find((candidate) => existsSync(candidate));
+
+    if (!source) {
+      if (artifact.required) {
+        console.error(`✗ ${artifact.label} not found. Looked in:`);
+        artifact.from.forEach((candidate) => console.error(`    ${candidate}`));
+        missingRequired = true;
+      } else {
+        console.warn(`- ${artifact.label} not built; skipping.`);
+      }
+      continue;
+    }
+
+    await copyFile(source, artifact.to);
+    console.log(`✓ ${artifact.label} → ${artifact.to}`);
+  }
+
+  if (missingRequired) {
+    console.error('\nRun `bun run build:rust` first.');
+    process.exit(1);
+  }
+
+  await bundleFfmpegRuntime();
+}
+
+await main();

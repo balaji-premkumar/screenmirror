@@ -20,6 +20,13 @@ set(CMAKE_C_STANDARD 11)
 add_library(mirror-source MODULE mirror_source.c)
 set_target_properties(mirror-source PROPERTIES PREFIX "")
 
+# The plugin's own directory, for the vendored `simde/x86/sse2.h`. libobs
+# headers include it, and distro libobs-dev packages do not always ship simde
+# alongside them. The `gcc` line this file replaced passed `-I.` for exactly
+# this reason; leaving it out here made the CMake build fail on any machine
+# where the header was not already on the system include path.
+target_include_directories(mirror-source PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Prefer an installed obs package (obs-studio dev packages export libobs)
 find_package(libobs QUIET)
 

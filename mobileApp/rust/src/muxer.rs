@@ -1,4 +1,4 @@
-use byteorder::{LittleEndian, WriteBytesExt};
+use mirror_protocol::{hevc, PacketType, HEADER_SIZE};
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,41 +16,14 @@ static BUFFER_POOL: Lazy<Mutex<Vec<Vec<u8>>>> = Lazy::new(|| {
     Mutex::new(pool)
 });
 
-/// Frame type tag bytes sent over the USB link
-#[derive(Clone, Copy)]
-#[repr(u8)]
-pub enum PacketType {
-    Video = 0x01,
-    Audio = 0x02,
-}
-
 /// Scan an Annex-B HEVC packet for parameter sets (VPS/SPS/PPS).
-/// Handles both 3- and 4-byte start codes. Used to preserve codec config
-/// packets across overflow drops and muxer restarts.
+///
+/// Used to preserve codec config packets across overflow drops and muxer
+/// restarts. The scan itself lives in `mirror-protocol` because the desktop
+/// receiver needs the same walker to build its `hvcC` record; keeping two
+/// copies is how the two ends came to disagree about trailing start codes.
 pub fn contains_csd(data: &[u8]) -> bool {
-    let mut i = 0;
-    while i + 3 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 {
-            let nal_start = if data[i + 2] == 1 {
-                i + 3
-            } else if data[i + 2] == 0 && i + 3 < data.len() && data[i + 3] == 1 {
-                i + 4
-            } else {
-                i += 1;
-                continue;
-            };
-            if nal_start < data.len() {
-                let nal_type = (data[nal_start] >> 1) & 0x3F;
-                if (32..=34).contains(&nal_type) {
-                    return true; // VPS/SPS/PPS
-                }
-            }
-            i = nal_start;
-        } else {
-            i += 1;
-        }
-    }
-    false
+    hevc::contains_parameter_sets(data)
 }
 
 /// A framed packet plus whether it carries parameter sets. Computed once on
@@ -59,11 +32,16 @@ pub fn contains_csd(data: &[u8]) -> bool {
 struct QueuedVideo {
     data: Vec<u8>,
     is_csd: bool,
+    is_key: bool,
 }
 
 struct QueueInner {
     video: VecDeque<QueuedVideo>,
     audio: VecDeque<Vec<u8>>,
+    /// Set after a drop left no keyframe to resume from. Until one arrives,
+    /// delta frames are discarded: sending them would only paint garbage on
+    /// the desktop, which has lost the frames they reference.
+    need_key: bool,
     closed: bool,
 }
 
@@ -80,7 +58,10 @@ pub struct UsbQueues {
 
 /// ~1.5 s of video at 120 fps. If USB falls this far behind, the link is
 /// effectively down and dropping (keeping CSD) is the right call.
-const VIDEO_QUEUE_CAP: usize = 180;
+/// Video frames held before the queue starts shedding load. Kept small on
+/// purpose: every queued frame is latency, and a stream that is behind should
+/// jump to the present rather than replay the past (8 frames ≈ 133 ms at 60 fps).
+const VIDEO_QUEUE_CAP: usize = 8;
 /// ~1.3 s of audio at 48 kHz / 1024-sample blocks.
 const AUDIO_QUEUE_CAP: usize = 64;
 
@@ -90,23 +71,63 @@ impl UsbQueues {
             inner: Mutex::new(QueueInner {
                 video: VecDeque::with_capacity(VIDEO_QUEUE_CAP),
                 audio: VecDeque::with_capacity(AUDIO_QUEUE_CAP),
+                need_key: false,
                 closed: false,
             }),
             cond: Condvar::new(),
         })
     }
 
-    fn push_video(&self, pkt: Vec<u8>, is_csd: bool) {
+    fn push_video(&self, pkt: Vec<u8>, info: hevc::PacketInfo) {
+        let (is_csd, is_key) = (info.has_parameter_sets, info.has_keyframe);
         let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        while q.video.len() >= VIDEO_QUEUE_CAP {
-            // Drop the oldest non-CSD packet.
-            let victim = q.video.iter().position(|p| !p.is_csd).unwrap_or(0);
-            if let Some(dropped) = q.video.remove(victim) {
-                Muxer::release_buffer(dropped.data);
+
+        if q.need_key {
+            if is_key {
+                q.need_key = false;
+            } else if !is_csd {
+                Muxer::release_buffer(pkt);
+                DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
+                return;
             }
-            DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
         }
-        q.video.push_back(QueuedVideo { data: pkt, is_csd });
+
+        if q.video.len() >= VIDEO_QUEUE_CAP {
+            // Dropping one delta frame corrupts every frame after it until the
+            // next keyframe, so shed the whole stale run instead: everything
+            // before the newest keyframe (the incoming packet counts). Bare
+            // parameter sets survive; the decoder needs them to restart.
+            let boundary = if is_key {
+                q.video.len()
+            } else {
+                q.video
+                    .iter()
+                    .rposition(|p| p.is_key)
+                    .unwrap_or(q.video.len())
+            };
+            if boundary == q.video.len() && !is_key {
+                q.need_key = true; // nothing to resume from yet
+            }
+            let mut idx = 0;
+            let mut dropped = 0;
+            q.video.retain(|p| {
+                let keep = idx >= boundary || (p.is_csd && !p.is_key);
+                idx += 1;
+                dropped += u64::from(!keep);
+                keep
+            });
+            DROPPED_VIDEO_FRAMES.fetch_add(dropped, Ordering::Relaxed);
+            if q.need_key && !is_csd {
+                // The incoming delta frame is as unusable as the ones just shed.
+                DROPPED_VIDEO_FRAMES.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        q.video.push_back(QueuedVideo {
+            data: pkt,
+            is_csd,
+            is_key,
+        });
         drop(q);
         self.cond.notify_one();
     }
@@ -175,34 +196,31 @@ impl Muxer {
 
     /// Push raw H.265 / HEVC encoded video data into the mux pipeline.
     /// Never blocks (drop-oldest on overflow).
-    pub fn push_video(&mut self, h265_data: &[u8]) {
+    pub fn push_video(&mut self, h265_data: &[u8], pts_us: u64) {
         // Scanned on the raw payload before framing, so the queue never has
         // to look at packet bytes again.
-        let is_csd = contains_csd(h265_data);
-        let frame = Self::frame_packet_pooled(PacketType::Video, h265_data);
-        self.queues.push_video(frame, is_csd);
+        let info = hevc::scan_packet(h265_data);
+        let frame = Self::frame_packet_pooled(PacketType::Video, h265_data, pts_us);
+        self.queues.push_video(frame, info);
     }
 
     /// Push raw PCM (f32 LE mono 48 kHz) audio data into the mux pipeline.
     /// Never blocks — safe to call from the audio capture thread.
-    pub fn push_audio(&mut self, pcm_data: &[u8]) {
-        let frame = Self::frame_packet_pooled(PacketType::Audio, pcm_data);
+    pub fn push_audio(&mut self, pcm_data: &[u8], pts_us: u64) {
+        let frame = Self::frame_packet_pooled(PacketType::Audio, pcm_data, pts_us);
         self.queues.push_audio(frame);
     }
 
-    fn frame_packet_pooled(ptype: PacketType, data: &[u8]) -> Vec<u8> {
+    fn frame_packet_pooled(ptype: PacketType, data: &[u8], pts_us: u64) -> Vec<u8> {
         let mut buf = if let Ok(mut pool) = BUFFER_POOL.lock() {
             pool.pop()
-                .unwrap_or_else(|| Vec::with_capacity(data.len() + 9))
+                .unwrap_or_else(|| Vec::with_capacity(data.len() + HEADER_SIZE))
         } else {
-            Vec::with_capacity(data.len() + 9)
+            Vec::with_capacity(data.len() + HEADER_SIZE)
         };
 
-        buf.clear();
-        buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-        buf.push(ptype as u8);
-        buf.write_u32::<LittleEndian>(data.len() as u32).unwrap();
-        buf.extend_from_slice(data);
+        // Clears and reserves for us, so a pooled buffer is reused in place.
+        mirror_protocol::write_frame(&mut buf, ptype, data, pts_us);
         buf
     }
 
@@ -221,24 +239,33 @@ mod tests {
     use super::*;
 
     fn framed(ptype: PacketType, payload: &[u8]) -> Vec<u8> {
-        Muxer::frame_packet_pooled(ptype, payload)
+        Muxer::frame_packet_pooled(ptype, payload, 7)
     }
 
     #[test]
-    fn frame_header_layout() {
+    fn pooled_framing_matches_the_shared_protocol() {
+        // The layout itself is covered in mirror-protocol. What matters here
+        // is that the pooled path produces byte-identical output to the plain
+        // one — a reused buffer that was not cleared would append instead.
         let f = framed(PacketType::Video, b"abc");
-        assert_eq!(&f[0..4], &[0xDE, 0xAD, 0xBE, 0xEF]);
-        assert_eq!(f[4], 0x01);
-        assert_eq!(u32::from_le_bytes([f[5], f[6], f[7], f[8]]), 3);
-        assert_eq!(&f[9..], b"abc");
+        let mut expected = Vec::new();
+        mirror_protocol::write_frame(&mut expected, PacketType::Video, b"abc", 7);
+        assert_eq!(f, expected);
+
+        // Recycle the buffer and frame something shorter through it.
+        Muxer::release_buffer(f);
+        let f2 = framed(PacketType::Audio, b"z");
+        let mut expected2 = Vec::new();
+        mirror_protocol::write_frame(&mut expected2, PacketType::Audio, b"z", 7);
+        assert_eq!(f2, expected2);
     }
 
     #[test]
     fn audio_has_priority() {
         let q = UsbQueues::new();
         let mut m = Muxer::new(q.clone());
-        m.push_video(b"vvvv");
-        m.push_audio(b"aaaa");
+        m.push_video(b"vvvv", 0);
+        m.push_audio(b"aaaa", 0);
         match q.pop_next(Duration::from_millis(10)) {
             PopResult::Packet(p) => assert_eq!(p[4], PacketType::Audio as u8),
             _ => panic!("expected packet"),
@@ -255,15 +282,53 @@ mod tests {
         let mut m = Muxer::new(q.clone());
         // CSD packet: VPS NAL (type 32)
         let csd = [0u8, 0, 0, 1, 32 << 1, 0x01];
-        m.push_video(&csd);
+        m.push_video(&csd, 0);
         for _ in 0..VIDEO_QUEUE_CAP + 5 {
-            m.push_video(b"frame");
+            m.push_video(b"frame", 0);
         }
         // First packet out must still be the CSD
         match q.pop_next(Duration::from_millis(10)) {
-            PopResult::Packet(p) => assert!(contains_csd(&p[9..])),
+            PopResult::Packet(p) => assert!(contains_csd(&p[HEADER_SIZE..])),
             _ => panic!("expected packet"),
         }
+    }
+
+    fn nal(t: u8) -> Vec<u8> {
+        vec![0, 0, 0, 1, t << 1, 1]
+    }
+
+    fn drain(q: &UsbQueues) -> Vec<u8> {
+        let mut types = Vec::new();
+        while let PopResult::Packet(p) = q.pop_next(Duration::from_millis(1)) {
+            types.push(p[HEADER_SIZE + 4] >> 1);
+        }
+        types
+    }
+
+    #[test]
+    fn overflow_sheds_the_stale_run_up_to_the_newest_keyframe() {
+        let q = UsbQueues::new();
+        let mut m = Muxer::new(q.clone());
+        m.push_video(&nal(19), 0); // old IDR
+        for _ in 0..VIDEO_QUEUE_CAP - 2 {
+            m.push_video(&nal(1), 0);
+        }
+        m.push_video(&nal(19), 0); // newest IDR
+        m.push_video(&nal(1), 0); // overflow: drop everything before the newest IDR
+        assert_eq!(drain(&q), vec![19, 1]);
+    }
+
+    #[test]
+    fn no_keyframe_to_resume_from_discards_deltas_until_one_arrives() {
+        let q = UsbQueues::new();
+        let mut m = Muxer::new(q.clone());
+        for _ in 0..VIDEO_QUEUE_CAP + 1 {
+            m.push_video(&nal(1), 0);
+        }
+        m.push_video(&nal(1), 0); // still waiting for a keyframe
+        m.push_video(&nal(19), 0);
+        m.push_video(&nal(1), 0);
+        assert_eq!(drain(&q), vec![19, 1]);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+# Configuration for `flutter gen-l10n`, which runs automatically as part of
+# `flutter build` and `flutter run`.
+#
+# The generated Dart lands in lib/src/l10n/generated/ and is git-ignored: it is
+# derived from the .arb files, so committing it would mean two sources of truth
+# for every string.
+arb-dir: lib/src/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-dir: lib/src/l10n/generated
+output-class: AppLocalizations
+nullable-getter: false

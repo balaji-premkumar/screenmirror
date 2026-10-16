@@ -1,0 +1,75 @@
+{
+  "@@locale": "en",
+
+  "appName": "Mirror",
+  "@appName": { "description": "The application name, shown in the header." },
+  "appTagline": "Companion",
+  "@appTagline": { "description": "Subtitle under the app name." },
+
+  "badgeNative": "Native",
+  "@badgeNative": { "description": "Shown when the native library has loaded." },
+  "badgeLoading": "Loading",
+  "@badgeLoading": { "description": "Shown while the native library is still loading." },
+
+  "statusWaitingForUsb": "Waiting for a USB connection",
+  "statusOpeningPipeline": "Opening the connection",
+  "statusReadyPressStart": "Connected — press Start on the computer",
+  "statusWaitingForApproval": "Waiting for screen capture approval",
+  "statusStreaming": "Streaming to the computer",
+  "statusCaptureDeclined": "Capture declined — press Start on the computer to try again",
+  "statusReadyForCapture": "Ready to capture",
+  "statusNativeMissing": "Native library missing — streaming is unavailable",
+  "statusPipelineFailed": "The USB connection could not be opened",
+
+  "metricThroughput": "Throughput",
+  "metricLatency": "Latency",
+  "metricFramerate": "Frame rate",
+
+  "logTitle": "Activity",
+  "logEmpty": "Nothing yet.",
+
+  "footerLinked": "Connected to the computer",
+  "footerPlugIn": "Plug in the USB cable to start",
+  "footerAutoConnect": "Connects automatically",
+
+  "eventAppStarted": "Mirror Companion started",
+  "eventAudioPermissionGranted": "Audio capture allowed",
+  "eventAudioPermissionDenied": "Audio not allowed — video will stream without sound",
+  "eventNotificationPermissionDenied": "Notifications not allowed — the Stop control may be hidden",
+  "eventUsbListening": "Watching for a USB connection",
+  "eventUsbAttached": "USB cable connected",
+  "eventUsbRecovered": "Reconnected to a USB session already in progress",
+  "eventUsbDetached": "USB cable disconnected",
+  "eventUsbQueryFailed": "Could not check for a USB connection: {error}",
+  "@eventUsbQueryFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "eventNativeLoading": "Loading the native library",
+  "eventNativeReady": "Native library ready",
+  "eventNativeFailed": "Native library unavailable: {error}",
+  "@eventNativeFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "eventPipelineStarting": "Preparing the video encoder",
+  "eventPipelineStarted": "USB connection open",
+  "eventPipelineFailed": "The USB connection failed to start: {error}",
+  "@eventPipelineFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "eventPipelineStopped": "Connection closed — ready to reconnect",
+  "eventConfigReceived": "Settings received from the computer",
+  "eventCaptureRequested": "Asking for permission to capture the screen",
+  "eventCaptureRequestFailed": "Could not ask for screen capture permission: {error}",
+  "@eventCaptureRequestFailed": {
+    "placeholders": { "error": { "type": "String" } }
+  },
+  "eventCaptureApproved": "Screen capture approved",
+  "eventCaptureDenied": "Screen capture declined — nothing is being sent",
+  "eventStreaming": "Video and audio are reaching the computer",
+  "eventStopRequested": "The computer asked to stop",
+  "eventStopped": "Streaming stopped — waiting for the next command",
+  "eventConnectionLost": "Connection lost ({state})",
+  "@eventConnectionLost": {
+    "placeholders": { "state": { "type": "String" } }
+  }
+}

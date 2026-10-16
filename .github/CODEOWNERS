@@ -1,0 +1,20 @@
+# Review is requested automatically from the owner of a touched path.
+#
+# The interesting entries are the shared packages: a change there affects both
+# the phone and the desktop at once, and a frame-format change that lands on
+# one side alone does not fail a build — it stalls the stream at runtime.
+
+*                               @balaji-premkumar
+
+# Shared between both applications. Changes here need the other side checked.
+/packages/                      @balaji-premkumar
+
+# The C ABI the interface depends on, and the shared-memory layout the OBS
+# plugin maps. Both are contracts with code that is compiled separately.
+/desktopApp/mirror_backend/src/ffi/         @balaji-premkumar
+/desktopApp/mirror_backend/src/sinks/obs_feed.rs  @balaji-premkumar
+/desktopApp/obs_plugin/                     @balaji-premkumar
+
+# Release and CI.
+/.github/                       @balaji-premkumar
+/tools/                         @balaji-premkumar

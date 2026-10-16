@@ -1,56 +1,118 @@
+@import '@fontsource-variable/schibsted-grotesk';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Force dark color scheme for all native form controls (select, option, scrollbars) */
+/*
+ * Colour tokens, as bare RGB channels so Tailwind can add opacity.
+ *
+ * "Signal" is the one saturated colour: the cable, the primary action, the
+ * selected option. Good/warn/bad are reserved for stream health and are never
+ * used decoratively, so a colour on screen always means something.
+ */
 :root {
-    color-scheme: dark;
+    --paper: 243 245 248;
+    --panel: 255 255 255;
+    --line: 217 223 231;
+    --ink: 15 26 43;
+    --muted: 91 104 121;
+    --signal: 37 71 245;
+    --signal-ink: 255 255 255;
+    --good: 14 159 110;
+    --warn: 176 104 0;
+    --bad: 207 54 49;
+    color-scheme: light;
 }
 
-/* Ensure select dropdowns and options are visible on dark backgrounds */
-select {
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 10px center;
-    padding-right: 28px !important;
-    color: #e5e7eb !important;
-    background-color: #1a1d24 !important;
+@media (prefers-color-scheme: dark) {
+    :root {
+        --paper: 11 18 32;
+        --panel: 18 27 45;
+        --line: 34 48 73;
+        --ink: 232 238 248;
+        --muted: 142 160 184;
+        --signal: 108 140 255;
+        --signal-ink: 11 18 32;
+        --good: 52 211 153;
+        --warn: 245 176 66;
+        --bad: 255 118 108;
+        color-scheme: dark;
+    }
 }
 
-select option {
-    background-color: #1a1d24 !important;
-    color: #e5e7eb !important;
-    padding: 8px 12px;
+@layer base {
+    html,
+    body,
+    #root {
+        min-height: 100%;
+    }
+
+    body {
+        margin: 0;
+        background: rgb(var(--paper));
+        color: rgb(var(--ink));
+        font-family: 'Schibsted Grotesk Variable', system-ui, sans-serif;
+        font-feature-settings: 'ss01', 'kern';
+        -webkit-font-smoothing: antialiased;
+    }
+
+    /* Keyboard focus is always visible, and never shown for mouse clicks. */
+    :focus-visible {
+        outline: 2px solid rgb(var(--signal));
+        outline-offset: 2px;
+        border-radius: 6px;
+    }
+
+    summary {
+        cursor: pointer;
+        list-style: none;
+    }
+    summary::-webkit-details-marker {
+        display: none;
+    }
 }
 
-select:focus {
-    outline: none;
-    border-color: rgba(249, 115, 22, 0.5); /* orange-500/50 */
+@layer components {
+    /* Live numbers must not jitter sideways as digits change. */
+    .num {
+        font-variant-numeric: tabular-nums;
+    }
 }
 
-/* Custom scrollbar for the log panel */
 .custom-scrollbar::-webkit-scrollbar {
-    width: 4px;
+    width: 6px;
 }
 .custom-scrollbar::-webkit-scrollbar-track {
     background: transparent;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: #333;
-    border-radius: 2px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: #555;
+    background: rgb(var(--line));
+    border-radius: 3px;
 }
 
-/* Smooth body */
-body {
-    margin: 0;
-    padding: 0;
-    background: #050608;
-    overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+/* The cable: dashes travel from the phone to the computer. */
+@keyframes cable-flow {
+    to {
+        stroke-dashoffset: -24;
+    }
+}
+.cable-flow {
+    stroke-dasharray: 6 18;
+    animation: cable-flow var(--flow-duration, 1s) linear infinite;
+}
+
+@keyframes prompt-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+}
+.prompt-pulse {
+    animation: prompt-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cable-flow,
+    .prompt-pulse {
+        animation: none;
+    }
 }

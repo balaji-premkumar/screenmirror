@@ -1,62 +1,167 @@
 name: Build Desktop App
 
 on:
-  workflow_call:
+  # Every push builds installable packages, so a branch can be tried on all
+  # three systems without cutting a release. Nothing is published: the files
+  # are workflow artifacts, kept for 14 days.
+  push:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Electrobun build channel (canary or stable)
+        type: choice
+        options: [canary, stable]
+        default: canary
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: stable
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHANNEL: ${{ inputs.channel || 'canary' }}
 
 jobs:
   build_desktop:
-    name: Build Desktop (${{ matrix.os }})
+    name: Desktop (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest, label: linux-x64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: macos-latest, label: macos-arm64 }
       fail-fast: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg-sys-next needs FFmpeg 8.1 headers and libraries to link, and
+      # bindgen needs libclang to generate the bindings. No runner image has
+      # FFmpeg 8.1, so Linux and Windows download it (and the same files are
+      # packaged), while macOS takes the versioned Homebrew formula.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libavcodec-dev libavformat-dev libswscale-dev libavutil-dev libsdl2-dev
+          sudo apt-get install -y clang libclang-dev pkg-config \
+            libwebkit2gtk-4.1-dev cmake libobs-dev
 
-      - name: Install dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+      - uses: ./.github/actions/setup-ffmpeg
+        if: runner.os != 'macOS'
+
+      - name: FFmpeg and clang (macOS)
+        if: runner.os == 'macOS'
+        # The plain `ffmpeg` formula has moved on to 9, whose headers the crate
+        # cannot compile against. The versioned formula is keg-only, so the
+        # build is pointed at it below.
+        run: brew install ffmpeg@8 pkg-config llvm
+
+      # Windows cannot open a phone until WinUSB is bound to it. libwdi's
+      # wdi-simple does that with a driver package it signs on the fly, so one
+      # UAC prompt replaces a manual Zadig session. Upstream publishes no
+      # binary, so build it the way libwdi's own MinGW workflow does. A failure
+      # here must not fail the app build: the app then runs, and the installer
+      # step in it explains what is missing.
+      - name: Fetch libwdi (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: cmd
         run: |
-          brew install ffmpeg sdl2 pkg-config
+          git clone --depth 1 --branch v1.5.1 https://github.com/pbatard/libwdi libwdi-src
+          curl -L https://go.microsoft.com/fwlink/p/?LinkID=253170 -o libwdi-src\wdk-redist.msi
+          msiexec /a libwdi-src\wdk-redist.msi /qn TARGETDIR=%CD%\libwdi-src\wdk
+
+      - name: MinGW toolchain (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: false
+          install: >-
+            mingw-w64-x86_64-toolchain
+            base-devel
+            autotools
+            git
+
+      - name: Build wdi-simple (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: msys2 {0}
+        working-directory: libwdi-src
+        run: |
+          set -e
+          ./bootstrap.sh
+          ./configure --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
+            --enable-toggable-debug --enable-examples-build --disable-debug \
+            --disable-shared --disable-32bit \
+            --with-wdkdir="wdk/Windows Kits/8.0" --with-wdfver=1011
+          make
+          mkdir -p ../desktopApp/wdi
+          cp examples/wdi-simple.exe ../desktopApp/wdi/
 
       - name: Install JS dependencies
+        working-directory: desktopApp
         run: bun install
-        working-directory: desktopApp
 
-      - name: Build Rust Backend
-        run: cargo build --release
-        working-directory: desktopApp/mirror_backend
+      - name: Build the backend
+        run: cargo build --release -p mirror_backend
         env:
-          PKG_CONFIG_PATH: ${{ matrix.os == 'macos-latest' && '/usr/local/opt/ffmpeg/lib/pkgconfig' || '' }}
+          # The packaged FFmpeg libraries sit next to the backend library, so it
+          # has to look in its own directory for them.
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-Wl,-rpath,$ORIGIN' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg@8/lib/pkgconfig:/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig' || '' }}
 
-      - name: Bundle Native Libraries
-        run: bash scripts/bundle.sh
+      # The OBS source plugin is bundled so "Install plugin" works from the
+      # package. Linux only: Windows and macOS need the OBS SDK, which CI does
+      # not fetch yet, and the bundler treats the plugin as optional.
+      - name: Build the OBS plugin (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build desktopApp/obs_plugin/build --config Release
+
+      # Cross-platform since it became a Bun script. The shell version it
+      # replaced could not run here at all on Windows, so that job built the
+      # DLL and then bundled nothing.
+      - name: Bundle native libraries
         working-directory: desktopApp
+        run: bun run build:bundle
 
-      - name: Build Electrobun App
-        run: bun run build:vite && npx electrobun build
+      # `electrobun build` writes the installer and update files to
+      # desktopApp/artifacts/. The channel only changes the file names and the
+      # update metadata; nothing is signed until certificates are configured.
+      - name: Package the app
         working-directory: desktopApp
+        run: |
+          bun run build:vite
+          bunx electrobun build --env=${{ env.CHANNEL }}
 
-      - name: Upload Binary
-        uses: actions/upload-artifact@v4
+      - name: List the package files
+        shell: bash
+        run: ls -lh desktopApp/artifacts
+
+      - uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: mirror-desktop-${{ matrix.os }}
-          path: |
-            desktopApp/build/
-            desktopApp/bin/
-            desktopApp/mirror_backend/target/release/libmirror_backend.*
-            desktopApp/mirror_backend/target/release/mirror_backend.dll
+          name: ScreenMirror-${{ matrix.label }}
+          path: desktopApp/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Link in the run summary
+        shell: bash
+        run: |
+          echo "### ScreenMirror ${{ matrix.label }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download the package](${{ steps.upload.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
