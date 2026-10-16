@@ -46,36 +46,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # ffmpeg-sys-next needs the FFmpeg development libraries to link, and
-      # bindgen needs libclang to generate the bindings. Every platform has to
-      # supply both, which is what issue #5 was about: Windows installed no
-      # FFmpeg at all, and Linux installed FFmpeg but not clang.
-      - name: FFmpeg and clang (Linux)
+      # ffmpeg-sys-next needs FFmpeg 8.1 headers and libraries to link, and
+      # bindgen needs libclang to generate the bindings. No runner image has
+      # FFmpeg 8.1, so Linux and Windows download it (and the same files are
+      # packaged), while macOS takes the versioned Homebrew formula.
+      - name: System libraries (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang libclang-dev pkg-config \
-            libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
-            libwebkit2gtk-4.1-dev \
-            cmake libobs-dev
+          sudo apt-get install -y clang libclang-dev pkg-config \
+            libwebkit2gtk-4.1-dev cmake libobs-dev
+
+      - uses: ./.github/actions/setup-ffmpeg
+        if: runner.os != 'macOS'
 
       - name: FFmpeg and clang (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config llvm
-
-      # There is no FFmpeg dev package on the Windows runners, so fetch a
-      # prebuilt shared build and point the ffmpeg-sys build script at it.
-      - name: FFmpeg (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $url = 'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-full_build-shared.zip'
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath $env:RUNNER_TEMP
-          $dir = (Get-ChildItem "$env:RUNNER_TEMP/ffmpeg-*-full_build-shared")[0].FullName
-          "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$dir/bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        # The plain `ffmpeg` formula has moved on to 9, whose headers the crate
+        # cannot compile against. The versioned formula is keg-only, so the
+        # build is pointed at it below.
+        run: brew install ffmpeg@8 pkg-config llvm
 
       # Windows cannot open a phone until WinUSB is bound to it. libwdi's
       # wdi-simple does that with a driver package it signs on the fly, so one
@@ -128,7 +118,10 @@ jobs:
       - name: Build the backend
         run: cargo build --release -p mirror_backend
         env:
-          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg/lib/pkgconfig:/opt/homebrew/opt/ffmpeg/lib/pkgconfig' || '' }}
+          # The packaged FFmpeg libraries sit next to the backend library, so it
+          # has to look in its own directory for them.
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-Wl,-rpath,$ORIGIN' || '' }}
+          PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg@8/lib/pkgconfig:/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig' || '' }}
 
       # The OBS source plugin is bundled so "Install plugin" works from the
       # package. Linux only: Windows and macOS need the OBS SDK, which CI does

@@ -95,25 +95,34 @@ function artifacts(): Artifact[] {
 }
 
 /**
- * Windows has no system FFmpeg, so the package carries its own: the shared
- * libraries the backend links against, and `ffplay.exe` for the player. CI
- * points FFMPEG_DIR at the build it compiled against, so what ships is exactly
- * what the backend was linked with. Elsewhere the system FFmpeg is used.
+ * Windows has no system FFmpeg, and Linux distributions rarely ship the 8.1 the
+ * backend links against, so those two packages carry their own: the shared
+ * libraries, and on Windows `ffplay.exe` for the player. CI points FFMPEG_DIR
+ * at the build it compiled against, so what ships is exactly what the backend
+ * was linked with. Linux libraries are found through the backend's `$ORIGIN`
+ * run path; `ffplay` there is the system one. macOS uses Homebrew's ffmpeg@8.
  */
-async function bundleWindowsFfmpeg() {
+async function bundleFfmpegRuntime() {
   const dir = process.env.FFMPEG_DIR;
-  if (process.platform !== 'win32' || !dir) return;
+  if (!dir || (process.platform !== 'win32' && process.platform !== 'linux')) return;
 
-  const source = join(dir, 'bin');
+  const windows = process.platform === 'win32';
+  const source = join(dir, windows ? 'bin' : 'lib');
   if (!existsSync(source)) {
-    console.warn(`- FFMPEG_DIR has no bin/ (${source}); not bundling FFmpeg.`);
+    console.warn(`- FFMPEG_DIR has no ${windows ? 'bin' : 'lib'}/ (${source}); not bundling FFmpeg.`);
     return;
   }
 
+  // Windows: every DLL plus ffplay. Linux: only the versioned sonames
+  // (libavcodec.so.62), not the dev symlink chain that would triple the size.
+  const wanted = (file: string) =>
+    windows
+      ? file.toLowerCase().endsWith('.dll') || file.toLowerCase() === 'ffplay.exe'
+      : /^lib.+\.so\.\d+$/.test(file);
+
   let copied = 0;
   for (const file of await readdir(source)) {
-    const lower = file.toLowerCase();
-    if (lower.endsWith('.dll') || lower === 'ffplay.exe') {
+    if (wanted(file)) {
       await copyFile(join(source, file), join(binDir, file));
       copied += 1;
     }
@@ -149,7 +158,7 @@ async function main() {
     process.exit(1);
   }
 
-  await bundleWindowsFfmpeg();
+  await bundleFfmpegRuntime();
 }
 
 await main();
