@@ -52,6 +52,50 @@ jobs:
           "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "$dir/bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
+      # Windows cannot open a phone until WinUSB is bound to it. libwdi's
+      # wdi-simple does that with a driver package it signs on the fly, so one
+      # UAC prompt replaces a manual Zadig session. Upstream publishes no
+      # binary, so build it the way libwdi's own MinGW workflow does. A failure
+      # here must not fail the app build: the app then runs, and the installer
+      # step in it explains what is missing.
+      - name: Fetch libwdi (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: cmd
+        run: |
+          git clone --depth 1 --branch v1.5.1 https://github.com/pbatard/libwdi libwdi-src
+          curl -L https://go.microsoft.com/fwlink/p/?LinkID=253170 -o libwdi-src\wdk-redist.msi
+          msiexec /a libwdi-src\wdk-redist.msi /qn TARGETDIR=%CD%\libwdi-src\wdk
+
+      - name: MinGW toolchain (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: false
+          install: >-
+            mingw-w64-x86_64-toolchain
+            base-devel
+            autotools
+            git
+
+      - name: Build wdi-simple (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: msys2 {0}
+        working-directory: libwdi-src
+        run: |
+          set -e
+          ./bootstrap.sh
+          ./configure --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 \
+            --enable-toggable-debug --enable-examples-build --disable-debug \
+            --disable-shared --disable-32bit \
+            --with-wdkdir="wdk/Windows Kits/8.0" --with-wdfver=1011
+          make
+          mkdir -p ../desktopApp/wdi
+          cp examples/wdi-simple.exe ../desktopApp/wdi/
+
       - name: Install JS dependencies
         working-directory: desktopApp
         run: bun install

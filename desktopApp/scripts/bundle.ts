@@ -79,6 +79,18 @@ function artifacts(): Artifact[] {
       // a needless barrier.
       required: false,
     },
+    ...(process.platform === 'win32'
+      ? [
+          {
+            label: 'WinUSB installer (wdi-simple)',
+            // Built from libwdi by the Windows CI job; see desktop.yml. Without
+            // it the app falls back to an unsigned INF that Windows rejects.
+            from: [join(desktopRoot, 'wdi', 'wdi-simple.exe')],
+            to: join(binDir, 'wdi-simple.exe'),
+            required: false,
+          },
+        ]
+      : []),
   ];
 }
 

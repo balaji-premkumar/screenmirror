@@ -68,3 +68,4 @@ desktopApp/obs_plugin/build/
 # ── Generated i18n bindings ─────────────────────────────────
 # `flutter gen-l10n` regenerates these from lib/src/l10n/*.arb on every build.
 mobileApp/lib/src/l10n/generated/
+desktopApp/wdi/

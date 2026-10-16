@@ -54,7 +54,7 @@
   "devices.connect": "Connect",
   "logs.title": "Activity",
   "logs.empty": "Nothing yet.",
-  "status.engine.needsDriver.body": "One step lets it talk to your phone over the cable. It asks for your password once.",
+  "status.engine.needsDriver.body": "One step lets Mirror talk to your phone over the cable. Plug your phone in first, then approve the system prompt.",
   "stage.thePhone": "your phone",
   "stage.connect": "Connect {name}",
   "stage.connecting": "Connecting…",

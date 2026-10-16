@@ -14,7 +14,7 @@ It uses the **Android Open Accessory (AOA) protocol** rather than ADB. That mean
 
 ## ✨ Features
 
-- **🔗 No ADB, no developer mode** — pure USB-AOA. USB permissions are configured on first launch (udev on Linux, WinUSB on Windows).
+- **🔗 No ADB, no developer mode** — pure USB-AOA. USB permissions are configured on first launch (udev on Linux, WinUSB on Windows, nothing on macOS). On Windows, plug the phone in first: the one-time setup binds the driver to your phone's own USB mode as well as to the accessory mode it switches into.
 - **🚀 Hardware-accelerated decode** — FFmpeg with VAAPI/NVDEC (Linux), D3D11VA/DXVA2 (Windows), VideoToolbox (macOS), and a multithreaded software fallback.
 - **🔊 System audio** — real-time game/media audio via Android `AudioPlaybackCapture` (48 kHz f32 mono). Captures what the device is *playing*, not the microphone.
 - **🎥 OBS Studio integration** — a shared-memory source plugin, so no capture card and no window-capture round trip.
@@ -208,6 +208,8 @@ ScreenMirror itself is MIT, but it builds against FFmpeg, which is **LGPL 2.1+**
 
 - The Rust backend **dynamically links** the system FFmpeg libraries, and `ffplay` is launched as a **separate process**. Neither imposes GPL terms on this project.
 - If you redistribute a build that **statically links** FFmpeg, or that bundles a GPL-configured FFmpeg, those terms apply to what you ship. Check before packaging binaries.
+
+Windows builds also bundle `wdi-simple.exe` from [libwdi](https://github.com/pbatard/libwdi) (**LGPL 3**), which installs the WinUSB driver. It runs as a separate process and is built unmodified from the upstream `v1.5.1` source in CI; the corresponding source is that tag.
 
 The OBS plugin links `libobs` (GPL 2.0+), so that plugin binary is subject to GPL terms when distributed. The plugin is a separate artifact from the desktop app.
 

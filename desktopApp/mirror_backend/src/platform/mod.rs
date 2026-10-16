@@ -27,6 +27,45 @@
 mod imp;
 
 /// Whether USB access has been granted on this machine.
+pub(crate) mod wdi;
+
+/// Where a phone exposes the vendor-specific interface that carries MTP or ADB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VendorInterface {
+    /// The interface number, which is what a Windows driver binds to on a
+    /// composite device.
+    pub number: u8,
+    /// How many interfaces the device has; more than one means composite.
+    pub interface_count: usize,
+}
+
+/// The first vendor-specific (0xFF) interface of `device`, if it has one.
+///
+/// This is the app's definition of "a phone that has not switched to accessory
+/// mode yet": MTP and ADB both appear as vendor-specific interfaces. Discovery
+/// and the Windows driver step share it so they cannot disagree about which
+/// devices are phones.
+pub(crate) fn vendor_interface<T: rusb::UsbContext>(
+    device: &rusb::Device<T>,
+) -> Option<VendorInterface> {
+    let config = device.active_config_descriptor().ok()?;
+    let interface_count = config.interfaces().count();
+    for interface in config.interfaces() {
+        if interface.descriptors().any(|alt| alt.class_code() == 0xFF) {
+            return Some(VendorInterface {
+                number: interface.number(),
+                interface_count,
+            });
+        }
+    }
+    None
+}
+
+/// Whether `device` looks like an Android phone not yet in accessory mode.
+pub(crate) fn is_android_candidate<T: rusb::UsbContext>(device: &rusb::Device<T>) -> bool {
+    vendor_interface(device).is_some()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverStatus {
     /// The accessory can be opened; nothing to install.

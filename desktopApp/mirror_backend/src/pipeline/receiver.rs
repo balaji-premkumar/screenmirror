@@ -433,18 +433,7 @@ pub fn start_usb_listener_thread(my_gen: u64) {
                                 }
                             }
                         } else {
-                            let mut android_candidate = false;
-                            if let Ok(config) = device.active_config_descriptor() {
-                                for intf in config.interfaces() {
-                                    for alt in intf.descriptors() {
-                                        if alt.class_code() == 0xFF {
-                                            android_candidate = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            if android_candidate {
+                            if crate::platform::is_android_candidate(&device) {
                                 let info = if let Some(cached) = info_cache.get(&device_key) {
                                     cached.clone()
                                 } else {

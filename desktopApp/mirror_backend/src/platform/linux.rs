@@ -14,18 +14,45 @@ const RULE_PATH: &str = "/etc/udev/rules.d/51-android-aoa.rules";
 /// install is not asked to authorise a second rule that does the same thing.
 const LEGACY_RULE_PATH: &str = "/etc/udev/rules.d/99-android-mirror.rules";
 
+/// First line of the rule, and the version it carries. Bump the number when
+/// the rule changes: an installed copy without the current marker is treated as
+/// out of date and replaced the next time the person allows USB access.
+const RULE_MARKER: &str = "# screenmirror-udev-rules: 2";
+
 /// The rule itself.
+///
+/// A phone needs access twice. Before the switch it is an ordinary device with
+/// its own vendor ID, and the AOA request that starts the switch has to be sent
+/// to it: matching only Google's accessory IDs left that first step to
+/// whatever rules the distribution happened to ship. After the switch it
+/// re-appears as `18d1:2d0x`.
+///
+/// Phones are recognised by what they expose, not by who made them: MTP
+/// (`ffff00`), PTP (`060101`) or ADB (`ff4201`) interfaces, from any vendor.
+/// `ID_USB_INTERFACES` is filled in by `50-udev-default.rules`, which runs
+/// before this file.
 ///
 /// `uaccess` hands the device to whoever is logged in at the seat, which is
 /// what we want and nothing more. The predecessor was `MODE="0666"` on a bare
 /// vendor match: world read/write on *every* Google USB device attached to the
-/// machine. The product match `2d0?` covers the AOA range 2D00–2D0F only.
+/// machine.
 const RULE_CONTENT: &str = "\
-# ScreenMirror — Android Open Accessory access for the active session\n\
-SUBSYSTEM==\"usb\", ATTR{idVendor}==\"18d1\", ATTR{idProduct}==\"2d0?\", TAG+=\"uaccess\"\n";
+# screenmirror-udev-rules: 2\n\
+# ScreenMirror: raw USB access for the logged-in user, for Android phones only.\n\
+# After the accessory switch (AOA product IDs 2d00-2d0f):\n\
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"18d1\", ATTR{idProduct}==\"2d0?\", TAG+=\"uaccess\"\n\
+# Before it, whoever made the phone: MTP, PTP and ADB interfaces.\n\
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{ID_USB_INTERFACES}==\"*:ffff00:*\", TAG+=\"uaccess\"\n\
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{ID_USB_INTERFACES}==\"*:060101:*\", TAG+=\"uaccess\"\n\
+SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ENV{ID_USB_INTERFACES}==\"*:ff4201:*\", TAG+=\"uaccess\"\n";
+
+/// Whether the installed rule is this version's.
+fn rule_is_current() -> bool {
+    std::fs::read_to_string(RULE_PATH).is_ok_and(|text| text.lines().next() == Some(RULE_MARKER))
+}
 
 pub(super) fn driver_status() -> DriverStatus {
-    if Path::new(RULE_PATH).exists() || Path::new(LEGACY_RULE_PATH).exists() {
+    if rule_is_current() || Path::new(LEGACY_RULE_PATH).exists() {
         DriverStatus::Ready
     } else {
         DriverStatus::NeedsInstall
@@ -33,7 +60,7 @@ pub(super) fn driver_status() -> DriverStatus {
 }
 
 pub(super) fn install_driver() -> InstallOutcome {
-    if Path::new(RULE_PATH).exists() {
+    if rule_is_current() {
         return InstallOutcome::NotNeeded;
     }
 
@@ -79,7 +106,7 @@ pub(super) fn install_driver() -> InstallOutcome {
     }
 
     match child.wait() {
-        Ok(status) if status.success() && Path::new(RULE_PATH).exists() => {
+        Ok(status) if status.success() && rule_is_current() => {
             log_event!(codes::DRIVER_SETUP_UDEV_INSTALLED);
             InstallOutcome::Installed
         }

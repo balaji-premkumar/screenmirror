@@ -26,7 +26,8 @@
 // nothing whenever it *was* included, which is how it went unnoticed that it
 // had drifted out of sync with the rest of the crate.
 
-use super::{DriverStatus, InstallOutcome};
+use super::wdi::{self, Target};
+use super::{vendor_interface, DriverStatus, InstallOutcome};
 use crate::log_event;
 use mirror_i18n::codes;
 use rusb::UsbContext;
@@ -56,36 +57,63 @@ pub(super) fn install_driver() -> InstallOutcome {
 
 /// 1 = an AOA accessory is claimable through WinUSB (or none is attached
 /// and a previously installed driver package is present), 0 = action needed.
+/// How long a status answer is reused. Polling asks every half second and each
+/// answer walks the USB bus, which is slow on Windows.
+const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+static STATUS_CACHE: std::sync::Mutex<Option<(i32, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// 1 when libusb can open every Android device that is plugged in, or when
+/// nothing is plugged in and our driver package is installed; 0 otherwise.
+///
+/// "Can open" is the real test. A phone with no WinUSB binding is invisible to
+/// libusb for any purpose beyond listing it, and that is true of the phone as
+/// first plugged in just as much as of the accessory it becomes.
 fn check_driver_status() -> i32 {
+    if let Ok(cache) = STATUS_CACHE.lock() {
+        if let Some((value, when)) = *cache {
+            if when.elapsed() < STATUS_TTL {
+                return value;
+            }
+        }
+    }
+    let value = probe_driver_status();
+    if let Ok(mut cache) = STATUS_CACHE.lock() {
+        *cache = Some((value, std::time::Instant::now()));
+    }
+    value
+}
+
+fn probe_driver_status() -> i32 {
     let ctx = match rusb::Context::new() {
         Ok(c) => c,
         Err(_) => return 0,
     };
 
-    let mut accessory_attached = false;
+    let mut any_android = false;
 
     if let Ok(devices) = ctx.devices() {
         for device in devices.iter() {
             let Ok(desc) = device.device_descriptor() else {
                 continue;
             };
-            if desc.vendor_id() == GOOGLE_VID && AOA_PID_RANGE.contains(&desc.product_id()) {
-                accessory_attached = true;
-                // Opening succeeds only when WinUSB is bound to the interface.
-                if device.open().is_ok() {
-                    return 1;
+            let is_accessory =
+                desc.vendor_id() == GOOGLE_VID && AOA_PID_RANGE.contains(&desc.product_id());
+            if is_accessory || vendor_interface(&device).is_some() {
+                any_android = true;
+                if device.open().is_err() {
+                    return 0;
                 }
             }
         }
     }
 
-    if accessory_attached {
-        // Accessory present but not claimable → driver missing.
-        return 0;
+    if any_android {
+        return 1;
     }
 
-    // No accessory attached right now — report OK if our driver package was
-    // installed previously so the UI doesn't nag on every launch.
+    // Nothing to open yet, so fall back to whether we installed anything.
     if driver_package_installed() {
         1
     } else {
@@ -121,9 +149,10 @@ fn driver_package_installed() -> bool {
         .args(["/enum-drivers"])
         .output()
         .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .to_lowercase()
-                .contains("mirror_aoa.inf")
+            let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            // Packages made by wdi-simple carry our provider name; the INF
+            // fallback is recognised by its file name.
+            text.contains(&wdi::PROVIDER.to_lowercase()) || text.contains("mirror_aoa.inf")
         })
         .unwrap_or(false);
 
@@ -135,6 +164,9 @@ fn driver_package_installed() -> bool {
 /// instead of up to a minute later.
 fn invalidate_driver_cache() {
     if let Ok(mut cache) = DRIVER_PACKAGE_CACHE.lock() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = STATUS_CACHE.lock() {
         *cache = None;
     }
 }
@@ -167,62 +199,92 @@ fn find_wdi_simple() -> Option<std::path::PathBuf> {
     None
 }
 
-fn install_with_wdi(wdi: &std::path::Path) -> i32 {
-    log_event!(codes::DRIVER_SETUP_LIBWDI_INSTALLING);
+/// Everything WinUSB should be bound to right now.
+///
+/// The accessory IDs are always included the first time, because the phone
+/// reappears under one of them after the switch and it is too late to install
+/// then. Phones that are plugged in are bound as they are, on the interface
+/// that carries MTP or ADB.
+fn install_targets() -> Vec<Target> {
+    let mut targets: Vec<Target> = if driver_package_installed() {
+        Vec::new()
+    } else {
+        AOA_PID_RANGE
+            .map(|pid| Target {
+                vid: GOOGLE_VID,
+                pid,
+                interface: None,
+                name: wdi::ACCESSORY_NAME,
+            })
+            .collect()
+    };
 
-    // Install for the whole AOA PID range plus any currently attached
-    // Android vendor device, so the phone works both before and after it
-    // switches to accessory mode.
-    let mut targets: Vec<(u16, u16)> = AOA_PID_RANGE.map(|pid| (GOOGLE_VID, pid)).collect();
     if let Ok(ctx) = rusb::Context::new() {
         if let Ok(devices) = ctx.devices() {
             for device in devices.iter() {
-                if let Ok(desc) = device.device_descriptor() {
-                    let pair = (desc.vendor_id(), desc.product_id());
-                    if desc.vendor_id() == GOOGLE_VID && !targets.contains(&pair) {
-                        targets.push(pair);
+                let Ok(desc) = device.device_descriptor() else {
+                    continue;
+                };
+                let is_accessory =
+                    desc.vendor_id() == GOOGLE_VID && AOA_PID_RANGE.contains(&desc.product_id());
+                if is_accessory {
+                    continue;
+                }
+                if let Some(found) = vendor_interface(&device) {
+                    let target = Target {
+                        vid: desc.vendor_id(),
+                        pid: desc.product_id(),
+                        // A single-function device is bound whole; on a
+                        // composite one only the interface that carries MTP/ADB,
+                        // so the phone's other functions keep their drivers.
+                        interface: (found.interface_count > 1).then_some(found.number),
+                        name: wdi::PHONE_NAME,
+                    };
+                    if !targets.contains(&target) {
+                        targets.push(target);
                     }
                 }
             }
         }
     }
-
-    // Chain all wdi-simple invocations into one elevated PowerShell command.
-    let mut inner = String::new();
-    for (vid, pid) in &targets {
-        inner.push_str(&format!(
-            "& '{}' --vid 0x{vid:04X} --pid 0x{pid:04X} --type 0 --name 'Android Accessory (ScreenMirror)' --dest '{}\\mirror_wdi' ; ",
-            wdi.display(),
-            std::env::temp_dir().display(),
-        ));
-    }
-
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',\"{}\"",
-                inner.replace('"', "`\"")
-            ),
-        ])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            invalidate_driver_cache();
-            log_event!(codes::DRIVER_SETUP_LIBWDI_FINISHED);
-            1
-        }
-        _ => {
-            log_event!(codes::DRIVER_SETUP_LIBWDI_FAILED);
-            -1
-        }
-    }
+    targets
 }
 
-/// WinUSB primitive-driver INF covering the AOA accessory PIDs (bare device
-/// and MI_00 composite interface variants).
+fn install_with_wdi(wdi_exe: &std::path::Path) -> i32 {
+    log_event!(codes::DRIVER_SETUP_LIBWDI_INSTALLING);
+
+    let targets = install_targets();
+    let dest = std::env::temp_dir().join("mirror_wdi");
+    let commands = wdi::install_commands(
+        &wdi_exe.display().to_string(),
+        &dest.display().to_string(),
+        &targets,
+    );
+
+    let ran = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &wdi::elevated(&commands)])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    // The elevated shell reports whether *it* ran, not whether the driver
+    // took, so judge by the same test the dashboard uses. The phone
+    // re-enumerates once its driver changes, which takes a moment.
+    if ran {
+        for _ in 0..16 {
+            invalidate_driver_cache();
+            if check_driver_status() == 1 {
+                log_event!(codes::DRIVER_SETUP_LIBWDI_FINISHED);
+                return 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    log_event!(codes::DRIVER_SETUP_LIBWDI_FAILED);
+    -1
+}
+
 const INF_TEMPLATE: &str = r#"; mirror_aoa.inf — WinUSB binding for Android Open Accessory devices
 ; Installed by ScreenMirror. Uses the inbox winusb.sys — no third-party code.
 
