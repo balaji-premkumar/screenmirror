@@ -82,6 +82,27 @@ table mapping "I want to add X" to the directory it belongs in.
 
 ---
 
+## 📦 Download a build
+
+Every push builds installable packages for all three systems. They are not published anywhere yet: open the workflow run, and the packages are listed under **Artifacts** at the bottom of the page (kept for 14 days).
+
+1. Open the [**Build Desktop App**](https://github.com/balaji-premkumar/screenmirror/actions/workflows/desktop.yml) and [**Build Mobile App**](https://github.com/balaji-premkumar/screenmirror/actions/workflows/mobile.yml) workflows.
+2. Pick the latest run for your branch.
+3. Download the package for your system. You need to be signed in to GitHub to download artifacts.
+
+| Artifact | For | Notes |
+| :--- | :--- | :--- |
+| `ScreenMirror-linux-x64` | Linux desktop | Extract the `…-Setup.tar.gz` and run the installer. Needs the FFmpeg runtime libraries and `ffplay` from your package manager; the package is built on Ubuntu, so other distributions may need a different FFmpeg version. |
+| `ScreenMirror-windows-x64` | Windows desktop | Bundles FFmpeg and `ffplay`. The first run asks for administrator approval once to install the USB driver; **plug your phone in before you approve it**. |
+| `ScreenMirror-macos-arm64` | Apple-silicon Mac | Needs `brew install ffmpeg`. Not signed or notarized yet, so macOS will warn the first time: right-click the app and choose Open. |
+| `ScreenMirror-android-debug-signed` | Android phone | Signed with the public debug key, so it is for trying the app only. Allow installs from unknown sources. |
+
+The phone app and the desktop app must come from the **same build**. The wire format changed in this version (frames now carry a capture timestamp), and an older phone app will not pair with a newer desktop app.
+
+Tagged releases build the same packages on the `stable` channel, require a real Android signing key, and attach everything to a GitHub release. Publishing to package registries is not set up yet.
+
+---
+
 ## 🛠️ Getting Started
 
 ### Prerequisites
@@ -153,12 +174,14 @@ A debug-signed APK must not be distributed — the debug key is public.
 
 ## 📖 Usage
 
-1. **Launch** the ScreenMirror desktop app.
-2. **Connect** your Android device by USB.
-3. **Open** the ScreenMirror companion app on the phone.
-4. **Authorize** the USB accessory and screen-recording prompts. Grant the microphone permission too if you want sound — it gates `AudioPlaybackCapture`, which records device output rather than the mic.
-5. **Press Start** in the desktop dashboard to begin capture.
-6. **Choose a sink**: *Play Video + Audio* for a player window, or *Send to OBS* if OBS is running with the plugin installed.
+1. **Launch** the ScreenMirror desktop app. The first launch checks USB access, the player and OBS, then opens the dashboard by itself when everything is fine.
+2. **Plug in** your Android phone with a USB cable. There is nothing to turn on first: no developer options and no USB debugging.
+3. **Connect** when the dashboard shows your phone. If the phone asks which app to open, choose ScreenMirror.
+4. **Pick a quality** preset (Light, Balanced, Sharp or Maximum), or open *Fine-tune* for resolution, frame rate, bitrate and audio source.
+5. **Press Start mirroring**, then approve the screen-sharing prompt on the phone. Grant the microphone permission too if you want sound: it gates `AudioPlaybackCapture`, which records device output rather than the mic.
+6. **Watch**: *Watch on this computer* opens a player window, and *Send to OBS* feeds the OBS source if OBS is running with the plugin installed.
+
+While it runs, the dashboard says in one line whether the stream is smooth, uneven, lagging or dropping frames, with the numbers underneath (frame rate, data rate, extra delay) and a suggestion when it is not smooth.
 
 ---
 
@@ -166,7 +189,9 @@ A debug-signed APK must not be distributed — the debug key is public.
 
 | Symptom | Likely cause |
 | :--- | :--- |
-| Phone never appears | udev rules not installed (Linux) or WinUSB not bound (Windows). Use **Fix USB Permissions** in the dashboard. |
+| Phone never appears | USB access not set up. Use **Allow USB access** in the dashboard: it installs a udev rule on Linux, or binds WinUSB on Windows (plug the phone in first). macOS needs nothing. After updating, the dashboard may ask once more, because the Linux rule is versioned and the Windows driver now also covers the phone's own USB mode. |
+| Phone and desktop will not pair | The phone app and desktop app are different versions. Install both from the same build. |
+| Video stutters while gaming | Try the **Light** preset, a different cable or USB port, and watch *Extra delay*: if it climbs, the link or the phone cannot keep up. |
 | Player button missing | `ffplay` not found on `PATH` or in `desktopApp/bin/`. |
 | *OBS: Not Running* / *Plugin Missing* | Start OBS, or install the plugin from the loader screen. |
 | Video but no sound | Microphone permission denied on the phone — `AudioPlaybackCapture` needs it even though it captures device output. |

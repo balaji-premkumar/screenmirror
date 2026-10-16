@@ -10,7 +10,7 @@
  * build does.
  */
 
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +94,33 @@ function artifacts(): Artifact[] {
   ];
 }
 
+/**
+ * Windows has no system FFmpeg, so the package carries its own: the shared
+ * libraries the backend links against, and `ffplay.exe` for the player. CI
+ * points FFMPEG_DIR at the build it compiled against, so what ships is exactly
+ * what the backend was linked with. Elsewhere the system FFmpeg is used.
+ */
+async function bundleWindowsFfmpeg() {
+  const dir = process.env.FFMPEG_DIR;
+  if (process.platform !== 'win32' || !dir) return;
+
+  const source = join(dir, 'bin');
+  if (!existsSync(source)) {
+    console.warn(`- FFMPEG_DIR has no bin/ (${source}); not bundling FFmpeg.`);
+    return;
+  }
+
+  let copied = 0;
+  for (const file of await readdir(source)) {
+    const lower = file.toLowerCase();
+    if (lower.endsWith('.dll') || lower === 'ffplay.exe') {
+      await copyFile(join(source, file), join(binDir, file));
+      copied += 1;
+    }
+  }
+  console.log(`✓ FFmpeg runtime (${copied} files) → ${binDir}`);
+}
+
 async function main() {
   await mkdir(binDir, { recursive: true });
 
@@ -121,6 +148,8 @@ async function main() {
     console.error('\nRun `bun run build:rust` first.');
     process.exit(1);
   }
+
+  await bundleWindowsFfmpeg();
 }
 
 await main();

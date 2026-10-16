@@ -1,16 +1,40 @@
 name: Build Desktop App
 
 on:
-  workflow_call:
+  # Every push builds installable packages, so a branch can be tried on all
+  # three systems without cutting a release. Nothing is published: the files
+  # are workflow artifacts, kept for 14 days.
+  push:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Electrobun build channel (canary or stable)
+        type: choice
+        options: [canary, stable]
+        default: canary
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: stable
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHANNEL: ${{ inputs.channel || 'canary' }}
 
 jobs:
   build_desktop:
-    name: Desktop (${{ matrix.os }})
+    name: Desktop (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest, label: linux-x64 }
+          - { os: windows-latest, label: windows-x64 }
+          - { os: macos-latest, label: macos-arm64 }
       fail-fast: false
 
     steps:
@@ -33,7 +57,8 @@ jobs:
           sudo apt-get install -y \
             clang libclang-dev pkg-config \
             libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
-            libwebkit2gtk-4.1-dev
+            libwebkit2gtk-4.1-dev \
+            cmake libobs-dev
 
       - name: FFmpeg and clang (macOS)
         if: runner.os == 'macOS'
@@ -105,6 +130,15 @@ jobs:
         env:
           PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg/lib/pkgconfig:/opt/homebrew/opt/ffmpeg/lib/pkgconfig' || '' }}
 
+      # The OBS source plugin is bundled so "Install plugin" works from the
+      # package. Linux only: Windows and macOS need the OBS SDK, which CI does
+      # not fetch yet, and the bundler treats the plugin as optional.
+      - name: Build the OBS plugin (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build desktopApp/obs_plugin/build --config Release
+
       # Cross-platform since it became a Bun script. The shell version it
       # replaced could not run here at all on Windows, so that job built the
       # DLL and then bundled nothing.
@@ -112,16 +146,29 @@ jobs:
         working-directory: desktopApp
         run: bun run build:bundle
 
-      - name: Build the app
+      # `electrobun build` writes the installer and update files to
+      # desktopApp/artifacts/. The channel only changes the file names and the
+      # update metadata; nothing is signed until certificates are configured.
+      - name: Package the app
         working-directory: desktopApp
         run: |
           bun run build:vite
-          bunx electrobun build
+          bunx electrobun build --env=${{ env.CHANNEL }}
+
+      - name: List the package files
+        shell: bash
+        run: ls -lh desktopApp/artifacts
 
       - uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: mirror-desktop-${{ matrix.os }}
-          path: |
-            desktopApp/build/
-            desktopApp/bin/
+          name: ScreenMirror-${{ matrix.label }}
+          path: desktopApp/artifacts/*
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Link in the run summary
+        shell: bash
+        run: |
+          echo "### ScreenMirror ${{ matrix.label }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download the package](${{ steps.upload.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"

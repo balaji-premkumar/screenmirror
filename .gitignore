@@ -69,3 +69,4 @@ desktopApp/obs_plugin/build/
 # `flutter gen-l10n` regenerates these from lib/src/l10n/*.arb on every build.
 mobileApp/lib/src/l10n/generated/
 desktopApp/wdi/
+desktopApp/artifacts/

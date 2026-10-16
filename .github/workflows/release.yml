@@ -16,10 +16,14 @@ jobs:
   mobile:
     needs: checks
     uses: ./.github/workflows/mobile.yml
+    with:
+      require_release_signing: true
 
   desktop:
     needs: checks
     uses: ./.github/workflows/desktop.yml
+    with:
+      channel: stable
 
   obs_plugin:
     needs: checks
@@ -41,10 +45,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/mirror-companion-apk/*.apk
-            artifacts/mirror-desktop-ubuntu-latest/**/*
-            artifacts/mirror-desktop-windows-latest/**/*
-            artifacts/mirror-desktop-macos-latest/**/*
+            artifacts/ScreenMirror-android/*.apk
+            artifacts/ScreenMirror-linux-x64/**/*
+            artifacts/ScreenMirror-windows-x64/**/*
+            artifacts/ScreenMirror-macos-arm64/**/*
             artifacts/obs-plugin-linux/*.so
           fail_on_unmatched_files: true
           generate_release_notes: true

@@ -1,8 +1,20 @@
 name: Build Mobile App
 
 on:
-  workflow_call:
+  # Every push builds an APK to try. Without a release key it is signed with
+  # the debug key and named as such, so it cannot be mistaken for a release.
+  push:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      require_release_signing:
+        description: Fail instead of producing a debug-signed APK
+        type: boolean
+        default: false
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build_android:
@@ -44,23 +56,42 @@ jobs:
         run: flutter build apk --release -PmirrorAbis=arm64-v8a,armeabi-v7a,x86_64
 
       # The release build falls back to the debug signing key when
-      # android/key.properties is absent, and logs a warning saying so. A
-      # debug-signed APK must never be published: the key is public, so anyone
-      # can re-sign and impersonate the build.
-      - name: Refuse to publish a debug-signed APK
+      # android/key.properties is absent, and logs a warning saying so. That key
+      # is public, so anyone can re-sign such an APK and impersonate the build.
+      # It is fine for trying a branch and never fine for a release: releases
+      # set require_release_signing, which turns this into a failure.
+      - name: Check how the APK is signed
+        id: signing
         working-directory: mobileApp
         run: |
           apk=build/app/outputs/flutter-apk/app-release.apk
           if unzip -p "$apk" META-INF/*.RSA 2>/dev/null \
              | keytool -printcert 2>/dev/null \
              | grep -q "CN=Android Debug"; then
-            echo "::error::The APK is signed with the debug key. Configure android/key.properties."
-            exit 1
+            if [ "${{ inputs.require_release_signing }}" = "true" ]; then
+              echo "::error::The APK is signed with the debug key. Configure android/key.properties."
+              exit 1
+            fi
+            echo "::warning::Signed with the public debug key. For testing only; do not distribute."
+            echo "name=ScreenMirror-android-debug-signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=ScreenMirror-android" >> "$GITHUB_OUTPUT"
           fi
-          echo "APK is not debug-signed."
+
+      - name: Name the APK
+        run: |
+          mkdir -p dist
+          cp mobileApp/build/app/outputs/flutter-apk/app-release.apk "dist/${{ steps.signing.outputs.name }}.apk"
 
       - uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: mirror-companion-apk
-          path: mobileApp/build/app/outputs/flutter-apk/app-release.apk
+          name: ${{ steps.signing.outputs.name }}
+          path: dist/*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Link in the run summary
+        run: |
+          echo "### ${{ steps.signing.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Download the APK](${{ steps.upload.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
