@@ -51,12 +51,12 @@ fn perform_aoa_handshake(handle: &mut DeviceHandle<RusbContext>) -> Result<(), r
     }
 
     let strings = [
-        "BalajiProjects",     // Index 0: manufacturer
-        "MirrorReceiver",     // Index 1: model
-        "Mirroring Stream",   // Index 2: description
-        "1.0",                // Index 3: version
-        "https://github.com", // Index 4: URI
-        "12345678",           // Index 5: serial
+        "BalajiProjects",             // Index 0: manufacturer
+        "MirrorReceiver",             // Index 1: model
+        "Mirroring Stream",           // Index 2: description
+        mirror_protocol::AOA_VERSION, // Index 3: version (matches the phone's accessory filter)
+        "https://github.com",         // Index 4: URI
+        "12345678",                   // Index 5: serial
     ];
     for (i, s) in strings.iter().enumerate() {
         match handle.write_control(0x40, 52, 0, i as u16, s.as_bytes(), timeout) {
@@ -151,6 +151,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
         let mut buf = vec![0u8; 1024 * 1024]; // 1MB read buffer
         let mut demuxer = crate::pipeline::demuxer::Demuxer::new();
         let mut last_activity = Instant::now();
+        let mut link_delay = crate::telemetry::metrics::LinkDelay::new();
         // Short timeout so pending config commands and shutdown signals are
         // observed quickly; at 120 fps data arrives every ~8 ms anyway, so
         // the timeout only fires when the link is idle.
@@ -205,9 +206,15 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
                     }
 
                     let frames = demuxer.feed(&buf[..len]);
+                    let arrival_us = (crate::now_nanos() / 1000) as i64;
                     for frame in frames {
                         match frame.packet_type {
                             mirror_protocol::PacketType::Video => {
+                                if let Some(us) = link_delay.observe(arrival_us, frame.pts_us) {
+                                    if let Ok(mut m) = crate::telemetry::metrics::METRICS.lock() {
+                                        m.record_link_delay(us / 1000);
+                                    }
+                                }
                                 // ffplay gets the encoded stream verbatim; it
                                 // is a no-op (one atomic load) when no player
                                 // session is running.

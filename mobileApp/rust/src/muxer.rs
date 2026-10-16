@@ -196,22 +196,22 @@ impl Muxer {
 
     /// Push raw H.265 / HEVC encoded video data into the mux pipeline.
     /// Never blocks (drop-oldest on overflow).
-    pub fn push_video(&mut self, h265_data: &[u8]) {
+    pub fn push_video(&mut self, h265_data: &[u8], pts_us: u64) {
         // Scanned on the raw payload before framing, so the queue never has
         // to look at packet bytes again.
         let info = hevc::scan_packet(h265_data);
-        let frame = Self::frame_packet_pooled(PacketType::Video, h265_data);
+        let frame = Self::frame_packet_pooled(PacketType::Video, h265_data, pts_us);
         self.queues.push_video(frame, info);
     }
 
     /// Push raw PCM (f32 LE mono 48 kHz) audio data into the mux pipeline.
     /// Never blocks — safe to call from the audio capture thread.
-    pub fn push_audio(&mut self, pcm_data: &[u8]) {
-        let frame = Self::frame_packet_pooled(PacketType::Audio, pcm_data);
+    pub fn push_audio(&mut self, pcm_data: &[u8], pts_us: u64) {
+        let frame = Self::frame_packet_pooled(PacketType::Audio, pcm_data, pts_us);
         self.queues.push_audio(frame);
     }
 
-    fn frame_packet_pooled(ptype: PacketType, data: &[u8]) -> Vec<u8> {
+    fn frame_packet_pooled(ptype: PacketType, data: &[u8], pts_us: u64) -> Vec<u8> {
         let mut buf = if let Ok(mut pool) = BUFFER_POOL.lock() {
             pool.pop()
                 .unwrap_or_else(|| Vec::with_capacity(data.len() + HEADER_SIZE))
@@ -220,7 +220,7 @@ impl Muxer {
         };
 
         // Clears and reserves for us, so a pooled buffer is reused in place.
-        mirror_protocol::write_frame(&mut buf, ptype, data);
+        mirror_protocol::write_frame(&mut buf, ptype, data, pts_us);
         buf
     }
 
@@ -239,7 +239,7 @@ mod tests {
     use super::*;
 
     fn framed(ptype: PacketType, payload: &[u8]) -> Vec<u8> {
-        Muxer::frame_packet_pooled(ptype, payload)
+        Muxer::frame_packet_pooled(ptype, payload, 7)
     }
 
     #[test]
@@ -249,14 +249,14 @@ mod tests {
         // one — a reused buffer that was not cleared would append instead.
         let f = framed(PacketType::Video, b"abc");
         let mut expected = Vec::new();
-        mirror_protocol::write_frame(&mut expected, PacketType::Video, b"abc");
+        mirror_protocol::write_frame(&mut expected, PacketType::Video, b"abc", 7);
         assert_eq!(f, expected);
 
         // Recycle the buffer and frame something shorter through it.
         Muxer::release_buffer(f);
         let f2 = framed(PacketType::Audio, b"z");
         let mut expected2 = Vec::new();
-        mirror_protocol::write_frame(&mut expected2, PacketType::Audio, b"z");
+        mirror_protocol::write_frame(&mut expected2, PacketType::Audio, b"z", 7);
         assert_eq!(f2, expected2);
     }
 
@@ -264,8 +264,8 @@ mod tests {
     fn audio_has_priority() {
         let q = UsbQueues::new();
         let mut m = Muxer::new(q.clone());
-        m.push_video(b"vvvv");
-        m.push_audio(b"aaaa");
+        m.push_video(b"vvvv", 0);
+        m.push_audio(b"aaaa", 0);
         match q.pop_next(Duration::from_millis(10)) {
             PopResult::Packet(p) => assert_eq!(p[4], PacketType::Audio as u8),
             _ => panic!("expected packet"),
@@ -282,9 +282,9 @@ mod tests {
         let mut m = Muxer::new(q.clone());
         // CSD packet: VPS NAL (type 32)
         let csd = [0u8, 0, 0, 1, 32 << 1, 0x01];
-        m.push_video(&csd);
+        m.push_video(&csd, 0);
         for _ in 0..VIDEO_QUEUE_CAP + 5 {
-            m.push_video(b"frame");
+            m.push_video(b"frame", 0);
         }
         // First packet out must still be the CSD
         match q.pop_next(Duration::from_millis(10)) {
@@ -309,12 +309,12 @@ mod tests {
     fn overflow_sheds_the_stale_run_up_to_the_newest_keyframe() {
         let q = UsbQueues::new();
         let mut m = Muxer::new(q.clone());
-        m.push_video(&nal(19)); // old IDR
+        m.push_video(&nal(19), 0); // old IDR
         for _ in 0..VIDEO_QUEUE_CAP - 2 {
-            m.push_video(&nal(1));
+            m.push_video(&nal(1), 0);
         }
-        m.push_video(&nal(19)); // newest IDR
-        m.push_video(&nal(1)); // overflow: drop everything before the newest IDR
+        m.push_video(&nal(19), 0); // newest IDR
+        m.push_video(&nal(1), 0); // overflow: drop everything before the newest IDR
         assert_eq!(drain(&q), vec![19, 1]);
     }
 
@@ -323,11 +323,11 @@ mod tests {
         let q = UsbQueues::new();
         let mut m = Muxer::new(q.clone());
         for _ in 0..VIDEO_QUEUE_CAP + 1 {
-            m.push_video(&nal(1));
+            m.push_video(&nal(1), 0);
         }
-        m.push_video(&nal(1)); // still waiting for a keyframe
-        m.push_video(&nal(19));
-        m.push_video(&nal(1));
+        m.push_video(&nal(1), 0); // still waiting for a keyframe
+        m.push_video(&nal(19), 0);
+        m.push_video(&nal(1), 0);
         assert_eq!(drain(&q), vec![19, 1]);
     }
 

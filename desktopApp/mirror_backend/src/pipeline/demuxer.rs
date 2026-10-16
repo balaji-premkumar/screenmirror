@@ -32,6 +32,8 @@ pub struct DemuxedFrame {
     pub packet_type: PacketType,
     /// The payload, header stripped.
     pub data: Vec<u8>,
+    /// Sender capture time in microseconds, or `0` when unknown.
+    pub pts_us: u64,
 }
 
 /// Stream demuxer. Feed it bytes, take out frames.
@@ -115,6 +117,7 @@ impl Demuxer {
             frames.push(DemuxedFrame {
                 packet_type: header.packet_type,
                 data: payload,
+                pts_us: header.pts_us,
             });
         }
 
@@ -153,7 +156,7 @@ mod tests {
 
     fn frame(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        mirror_protocol::write_frame(&mut buf, packet_type, payload);
+        mirror_protocol::write_frame(&mut buf, packet_type, payload, 0);
         buf
     }
 

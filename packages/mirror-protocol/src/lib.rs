@@ -10,10 +10,15 @@
 //! # Frame layout
 //!
 //! ```text
-//! ┌────────────┬──────────┬──────────────────┬───────────────┐
-//! │ 4B magic   │ 1B type  │ 4B length (LE)   │ N bytes       │
-//! │ DE AD BE EF│ 01 or 02 │ payload length   │ payload       │
-//! └────────────┴──────────┴──────────────────┴───────────────┘
+//! ┌────────────┬──────────┬────────────────┬──────────────────┬─────────┐
+//! │ 4B magic   │ 1B type  │ 4B length (LE) │ 8B pts µs (LE)   │ N bytes │
+//! │ DE AD BE EF│ 01 or 02 │ payload length │ capture time     │ payload │
+//! └────────────┴──────────┴────────────────┴──────────────────┴─────────┘
+//!
+//! `pts` is the sender's monotonic clock at capture, in microseconds. It is
+//! not comparable with the receiver's clock, but differences between frames
+//! are: that is enough to measure how much delay the link and queues add
+//! beyond the best case. `0` means the sender had no timestamp.
 //! ```
 //!
 //! USB bulk transfers split and coalesce arbitrarily, so a reader must be able
@@ -32,8 +37,8 @@ pub mod hevc;
 /// before trusting the frame.
 pub const MAGIC: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 
-/// Bytes before the payload: 4 magic + 1 type + 4 length.
-pub const HEADER_SIZE: usize = 9;
+/// Bytes before the payload: 4 magic + 1 type + 4 length + 8 pts.
+pub const HEADER_SIZE: usize = 17;
 
 /// Largest payload a reader will accept.
 ///
@@ -49,7 +54,12 @@ pub const MAX_PAYLOAD_SIZE: usize = 8 * 1024 * 1024;
 /// It is not currently transmitted — the AOA handshake strings carry the
 /// version the two sides negotiate on. It is defined here so that when a
 /// version byte is added there is one place that already owns the number.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
+
+/// The AOA handshake version string, and what the phone's accessory filter
+/// matches. Two sides that disagree on the header layout must not pair: the
+/// phone's app simply is not offered, instead of a stream that never parses.
+pub const AOA_VERSION: &str = "2.0";
 
 /// What a frame carries.
 ///
@@ -93,6 +103,8 @@ pub struct FrameHeader {
     pub packet_type: PacketType,
     /// Payload length in bytes, already validated against [`MAX_PAYLOAD_SIZE`].
     pub payload_len: usize,
+    /// Sender capture time in microseconds, or `0` when unknown.
+    pub pts_us: u64,
 }
 
 impl FrameHeader {
@@ -127,9 +139,12 @@ impl FrameHeader {
         if payload_len > MAX_PAYLOAD_SIZE {
             return Err(HeaderError::PayloadTooLarge(payload_len));
         }
+        let mut pts = [0u8; 8];
+        pts.copy_from_slice(&bytes[9..17]);
         Ok(FrameHeader {
             packet_type,
             payload_len,
+            pts_us: u64::from_le_bytes(pts),
         })
     }
 }
@@ -176,7 +191,7 @@ impl std::error::Error for HeaderError {}
 /// Panics if `payload_len` exceeds [`MAX_PAYLOAD_SIZE`]. A sender that has
 /// produced an oversized payload has a bug that the receiver would otherwise
 /// see only as an unexplained stream resynchronisation.
-pub fn write_header(out: &mut Vec<u8>, packet_type: PacketType, payload_len: usize) {
+pub fn write_header(out: &mut Vec<u8>, packet_type: PacketType, payload_len: usize, pts_us: u64) {
     assert!(
         payload_len <= MAX_PAYLOAD_SIZE,
         "payload of {payload_len} bytes exceeds the protocol maximum of {MAX_PAYLOAD_SIZE}"
@@ -184,6 +199,7 @@ pub fn write_header(out: &mut Vec<u8>, packet_type: PacketType, payload_len: usi
     out.extend_from_slice(&MAGIC);
     out.push(packet_type.as_byte());
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.extend_from_slice(&pts_us.to_le_bytes());
 }
 
 /// Writes a complete frame — header then payload — into `out`.
@@ -194,10 +210,10 @@ pub fn write_header(out: &mut Vec<u8>, packet_type: PacketType, payload_len: usi
 ///
 /// Panics if `payload` is longer than [`MAX_PAYLOAD_SIZE`]; see
 /// [`write_header`].
-pub fn write_frame(out: &mut Vec<u8>, packet_type: PacketType, payload: &[u8]) {
+pub fn write_frame(out: &mut Vec<u8>, packet_type: PacketType, payload: &[u8], pts_us: u64) {
     out.clear();
     out.reserve(HEADER_SIZE + payload.len());
-    write_header(out, packet_type, payload.len());
+    write_header(out, packet_type, payload.len(), pts_us);
     out.extend_from_slice(payload);
 }
 
@@ -234,17 +250,20 @@ mod tests {
 
     fn frame(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_frame(&mut buf, packet_type, payload);
+        write_frame(&mut buf, packet_type, payload, 0);
         buf
     }
 
     #[test]
-    fn header_layout_is_magic_type_then_le_length() {
-        let f = frame(PacketType::Video, b"abc");
+    fn header_layout_is_magic_type_length_then_pts() {
+        let mut f = Vec::new();
+        write_frame(&mut f, PacketType::Video, b"abc", 0x0102_0304_0506_0708);
         assert_eq!(&f[0..4], &MAGIC);
         assert_eq!(f[4], 0x01);
         assert_eq!(u32::from_le_bytes([f[5], f[6], f[7], f[8]]), 3);
-        assert_eq!(&f[9..], b"abc");
+        assert_eq!(&f[9..17], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&f[17..], b"abc");
+        assert_eq!(FrameHeader::parse(&f).unwrap().pts_us, 0x0102_0304_0506_0708);
     }
 
     #[test]
@@ -268,7 +287,7 @@ mod tests {
         let f = frame(PacketType::Video, b"abc");
         // One byte short of a header must not read as corruption: the caller
         // has to know to wait rather than to skip past the magic.
-        assert_eq!(FrameHeader::parse(&f[..8]), Err(HeaderError::Short));
+        assert_eq!(FrameHeader::parse(&f[..HEADER_SIZE - 1]), Err(HeaderError::Short));
         assert!(FrameHeader::parse(&f).is_ok());
     }
 
@@ -318,6 +337,6 @@ mod tests {
     #[should_panic(expected = "exceeds the protocol maximum")]
     fn writing_an_oversized_payload_panics_at_the_sender() {
         let mut buf = Vec::new();
-        write_header(&mut buf, PacketType::Video, MAX_PAYLOAD_SIZE + 1);
+        write_header(&mut buf, PacketType::Video, MAX_PAYLOAD_SIZE + 1, 0);
     }
 }

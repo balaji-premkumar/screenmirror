@@ -17,6 +17,12 @@ pub struct MetricsSnapshot {
     /// latency is not measurable without a sender-side capture timestamp on
     /// the wire — see "Known gaps" in `docs/ARCHITECTURE.md`.
     pub decode_latency_ms: u64,
+    /// Delay the phone's encoder and queues and the USB link add to a frame
+    /// beyond the best case seen recently, from the sender's capture time.
+    /// The two clocks are unrelated, so only the variation is meaningful: a
+    /// steady 0 means frames arrive as fast as they ever do, and a climbing
+    /// value means a queue somewhere between capture and the desktop is filling.
+    pub link_delay_ms: u64,
     pub fps_actual: f64,
     pub frames_dropped: u64,
     pub buffer_health: f64, // 0.0 to 1.0
@@ -30,6 +36,7 @@ pub struct MetricsManager {
     pub start_time: Instant,
     pub dropped_count: u64,
     pub current_latency: u64,
+    pub link_delay_ms: u64,
     last_snapshot: Option<MetricsSnapshot>,
 }
 
@@ -49,6 +56,7 @@ impl MetricsManager {
             start_time: Instant::now(),
             dropped_count: 0,
             current_latency: 0,
+            link_delay_ms: 0,
             last_snapshot: None,
         }
     }
@@ -63,6 +71,10 @@ impl MetricsManager {
         self.current_latency = latency;
     }
 
+    pub fn record_link_delay(&mut self, ms: u64) {
+        self.link_delay_ms = ms;
+    }
+
     pub fn record_drop(&mut self) {
         self.dropped_count += 1;
     }
@@ -75,6 +87,7 @@ impl MetricsManager {
         self.start_time = Instant::now();
         self.dropped_count = 0;
         self.current_latency = 0;
+        self.link_delay_ms = 0;
         self.last_snapshot = None;
     }
 
@@ -125,11 +138,92 @@ impl MetricsManager {
         let snapshot = MetricsSnapshot {
             throughput_mbps: throughput,
             decode_latency_ms: self.current_latency,
+            link_delay_ms: self.link_delay_ms,
             fps_actual: fps,
             frames_dropped: self.dropped_count,
             buffer_health,
         };
         self.last_snapshot = Some(snapshot.clone());
         snapshot
+    }
+}
+
+/// Turns sender capture times into "how much slower than the best case".
+///
+/// The best case is the smallest `arrival - pts` seen, over a sliding pair of
+/// windows so that slow clock drift between the two devices does not
+/// accumulate into a permanent offset.
+pub struct LinkDelay {
+    floor: i64,
+    window_min: i64,
+    window_start: Option<i64>,
+}
+
+impl Default for LinkDelay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LinkDelay {
+    const WINDOW_US: i64 = 30_000_000;
+
+    pub fn new() -> Self {
+        Self {
+            floor: i64::MAX,
+            window_min: i64::MAX,
+            window_start: None,
+        }
+    }
+
+    /// Microseconds this frame was later than the best case, or `None` when
+    /// the sender gave no timestamp (`pts_us == 0`).
+    pub fn observe(&mut self, arrival_us: i64, pts_us: u64) -> Option<u64> {
+        if pts_us == 0 {
+            return None;
+        }
+        let start = *self.window_start.get_or_insert(arrival_us);
+        if arrival_us - start >= Self::WINDOW_US {
+            self.floor = self.window_min;
+            self.window_min = i64::MAX;
+            self.window_start = Some(arrival_us);
+        }
+        let d = arrival_us - pts_us as i64;
+        self.window_min = self.window_min.min(d);
+        Some((d - self.floor.min(self.window_min)) as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steady_arrivals_read_zero_and_a_stall_reads_as_the_extra_wait() {
+        let mut l = LinkDelay::new();
+        // A different clock origin must not matter: only differences count.
+        let offset = 5_000_000_000;
+        assert_eq!(l.observe(offset + 1_000, 1_000), Some(0));
+        assert_eq!(l.observe(offset + 17_000, 17_000), Some(0));
+        assert_eq!(l.observe(offset + 80_000, 33_000), Some(47_000));
+    }
+
+    #[test]
+    fn missing_timestamp_is_not_a_measurement() {
+        assert_eq!(LinkDelay::new().observe(10, 0), None);
+    }
+
+    #[test]
+    fn the_floor_follows_the_clocks_instead_of_accumulating_drift() {
+        let mut l = LinkDelay::new();
+        l.observe(100, 50);
+        // The clocks drift 4 ms apart. For one window that reads as delay...
+        let w = LinkDelay::WINDOW_US as u64;
+        assert_eq!(l.observe(w as i64 + 100, w + 100 - 50 - 4_000), Some(4_000));
+        // ...and once the old window has rotated out, it is the new normal.
+        assert_eq!(
+            l.observe(2 * w as i64 + 200, 2 * w + 200 - 50 - 4_000),
+            Some(0)
+        );
     }
 }

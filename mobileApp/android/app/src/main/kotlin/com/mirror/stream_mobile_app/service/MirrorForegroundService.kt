@@ -62,8 +62,8 @@ class MirrorForegroundService : Service() {
 
     // JNI bridge into the Rust USB pipeline. The arrays are reused across
     // frames, so the valid payload is the first `len` bytes.
-    private external fun pushToUsb(data: ByteArray, len: Int): Boolean
-    private external fun pushAudioToUsb(data: ByteArray, len: Int): Boolean
+    private external fun pushToUsb(data: ByteArray, len: Int, ptsUs: Long): Boolean
+    private external fun pushAudioToUsb(data: ByteArray, len: Int, ptsUs: Long): Boolean
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -369,7 +369,7 @@ class MirrorForegroundService : Service() {
                         outputBuffer.get(outData, 0, bufferInfo.size)
 
                         // Push encoded H.265 NAL units to Rust for USB transmission
-                        val sent = pushToUsb(outData, bufferInfo.size)
+                        val sent = pushToUsb(outData, bufferInfo.size, bufferInfo.presentationTimeUs)
                         if (!sent && frameCount % 120 == 0L) {
                             android.util.Log.w("MirrorService", "Frame $frameCount: USB pipeline not ready, frame dropped")
                         }
@@ -453,7 +453,7 @@ class MirrorForegroundService : Service() {
                     if (read > 0) {
                         bytes.clear()
                         for (i in 0 until read) bytes.putFloat(floats[i])
-                        pushAudioToUsb(out, read * 4)
+                        pushAudioToUsb(out, read * 4, System.nanoTime() / 1000)
                     } else if (read < 0) {
                         android.util.Log.w("MirrorService", "AudioRecord read error: $read")
                         break
