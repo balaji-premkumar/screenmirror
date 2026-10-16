@@ -271,7 +271,10 @@ mod tests {
         assert_eq!(u32::from_le_bytes([f[5], f[6], f[7], f[8]]), 3);
         assert_eq!(&f[9..17], &0x0102_0304_0506_0708u64.to_le_bytes());
         assert_eq!(&f[17..], b"abc");
-        assert_eq!(FrameHeader::parse(&f).unwrap().pts_us, 0x0102_0304_0506_0708);
+        assert_eq!(
+            FrameHeader::parse(&f).unwrap().pts_us,
+            0x0102_0304_0506_0708
+        );
     }
 
     #[test]
@@ -295,7 +298,10 @@ mod tests {
         let f = frame(PacketType::Video, b"abc");
         // One byte short of a header must not read as corruption: the caller
         // has to know to wait rather than to skip past the magic.
-        assert_eq!(FrameHeader::parse(&f[..HEADER_SIZE - 1]), Err(HeaderError::Short));
+        assert_eq!(
+            FrameHeader::parse(&f[..HEADER_SIZE - 1]),
+            Err(HeaderError::Short)
+        );
         assert!(FrameHeader::parse(&f).is_ok());
     }
 
