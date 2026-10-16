@@ -210,6 +210,7 @@ pub fn deliver_frame(buffer: Vec<u8>, width: u32, height: u32, decode_started: I
 pub fn push_video_packet(data: Vec<u8>) {
     let dropped = VIDEO_QUEUE.push(data);
     if dropped > 0 {
+        pipeline::receiver::request_keyframe();
         if let Ok(mut m) = telemetry::metrics::METRICS.lock() {
             for _ in 0..dropped {
                 m.record_drop();

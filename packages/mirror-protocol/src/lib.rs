@@ -61,6 +61,14 @@ pub const PROTOCOL_VERSION: u16 = 2;
 /// phone's app simply is not offered, instead of a stream that never parses.
 pub const AOA_VERSION: &str = "2.0";
 
+/// The control message a receiver sends when it has lost frames and needs the
+/// sender to emit a keyframe now, rather than at the next scheduled one.
+///
+/// Control messages travel desktop → phone as NUL-terminated JSON, the same
+/// channel as configuration. This one is matched exactly, so it cannot be
+/// confused with a settings message.
+pub const KEYFRAME_REQUEST: &str = r#"{"cmd":"keyframe"}"#;
+
 /// What a frame carries.
 ///
 /// The discriminants are the bytes on the wire; do not renumber them without

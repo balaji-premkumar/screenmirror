@@ -8,6 +8,7 @@ use crate::log_event;
 use mirror_i18n::codes;
 use once_cell::sync::Lazy;
 use rusb::{Context as RusbContext, DeviceHandle, UsbContext};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,19 @@ pub static DISCOVERED_DEVICES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::ne
 static STREAMING_ACTIVE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static PENDING_CONFIG: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 pub static FORCE_DISCONNECT: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+/// Set when frames were lost and the decoder needs a keyframe to recover.
+static KEYFRAME_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Minimum gap between keyframe requests. A burst of drops should cost one
+/// large keyframe, not a queue of them.
+const KEYFRAME_REQUEST_GAP: Duration = Duration::from_millis(250);
+
+/// Asks the phone for a keyframe. Cheap to call repeatedly; the receiver loop
+/// sends at most one request per [`KEYFRAME_REQUEST_GAP`].
+pub fn request_keyframe() {
+    KEYFRAME_WANTED.store(true, Ordering::Release);
+}
+
 pub static AUTO_RECONNECT_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 
 /// Public accessor for the streaming state, used by get_status() in lib.rs
@@ -152,6 +166,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
         let mut demuxer = crate::pipeline::demuxer::Demuxer::new();
         let mut last_activity = Instant::now();
         let mut link_delay = crate::telemetry::metrics::LinkDelay::new();
+        let mut last_keyframe_request = Instant::now() - KEYFRAME_REQUEST_GAP;
         // Short timeout so pending config commands and shutdown signals are
         // observed quickly; at 120 fps data arrives every ~8 ms anyway, so
         // the timeout only fires when the link is idle.
@@ -195,6 +210,18 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
                         }
                     }
                 }
+            }
+
+            // 2b. Ask for a keyframe if the pipeline lost frames.
+            if last_keyframe_request.elapsed() >= KEYFRAME_REQUEST_GAP
+                && KEYFRAME_WANTED.swap(false, Ordering::AcqRel)
+            {
+                last_keyframe_request = Instant::now();
+                let mut msg = mirror_protocol::KEYFRAME_REQUEST.as_bytes().to_vec();
+                msg.push(0);
+                // Best effort: a lost request is repeated by the next drop,
+                // and the scheduled keyframe arrives within a second anyway.
+                let _ = handle.write_bulk(endpoint_out, &msg, Duration::from_millis(200));
             }
 
             // 3. Stream data from USB

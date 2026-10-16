@@ -20,6 +20,7 @@ import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.view.Surface
 import androidx.core.app.NotificationCompat
@@ -64,6 +65,7 @@ class MirrorForegroundService : Service() {
     // frames, so the valid payload is the first `len` bytes.
     private external fun pushToUsb(data: ByteArray, len: Int, ptsUs: Long): Boolean
     private external fun pushAudioToUsb(data: ByteArray, len: Int, ptsUs: Long): Boolean
+    private external fun takeKeyframeRequest(): Boolean
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -350,6 +352,16 @@ class MirrorForegroundService : Service() {
         var outData = ByteArray(256 * 1024)
         while (isRunning) {
             val encoder = mediaCodec ?: break
+            // The desktop lost frames and is waiting on a keyframe: emit one
+            // now instead of leaving it to find the next scheduled one.
+            if (takeKeyframeRequest()) {
+                try {
+                    encoder.setParameters(Bundle().apply {
+                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                    })
+                } catch (_: Exception) {
+                }
+            }
             val outputBufferIndex = try {
                 encoder.dequeueOutputBuffer(bufferInfo, 10_000)
             } catch (e: Exception) {

@@ -1,4 +1,4 @@
-use crate::usb_loop::{push_audio_to_muxer, push_video_to_muxer};
+use crate::usb_loop::{push_audio_to_muxer, push_video_to_muxer, KEYFRAME_REQUESTED};
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
@@ -74,6 +74,20 @@ pub extern "system" fn Java_com_mirror_stream_1mobile_1app_service_MirrorForegro
     if with_bytes(&env, &data, len, |b| {
         push_audio_to_muxer(b, pts_us.max(0) as u64)
     }) {
+        jni::sys::JNI_TRUE
+    } else {
+        jni::sys::JNI_FALSE
+    }
+}
+
+/// True once per keyframe request from the desktop. The encoder thread polls
+/// this between output buffers and asks MediaCodec for a sync frame.
+#[no_mangle]
+pub extern "system" fn Java_com_mirror_stream_1mobile_1app_service_MirrorForegroundService_takeKeyframeRequest(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jboolean {
+    if KEYFRAME_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
         jni::sys::JNI_TRUE
     } else {
         jni::sys::JNI_FALSE

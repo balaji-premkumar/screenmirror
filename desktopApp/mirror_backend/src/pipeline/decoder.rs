@@ -335,6 +335,9 @@ pub fn start_decoder_thread(queue: Arc<VideoQueue>, my_gen: u64) {
                 Ok(_) => consecutive_errors = 0,
                 Err(e) => {
                     consecutive_errors += 1;
+                    // A decode error usually means a missing reference; a
+                    // fresh keyframe is the cheapest way back.
+                    crate::pipeline::receiver::request_keyframe();
                     if consecutive_errors <= 3 {
                         log_event!(codes::DECODER_DECODE_FAILED, "error" => format!("{e:?}"));
                     }

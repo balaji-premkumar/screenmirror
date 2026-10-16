@@ -182,9 +182,11 @@ dialog was still on screen.
 
 ## Known gaps
 
-- Latency is measured from *arrival*, not from capture. Honest end-to-end
-  latency needs a sender-side timestamp on the wire, which the frame format
-  does not carry yet.
+- End-to-end latency is still not shown as one number. The frame header carries
+  the sender's capture time (protocol v2), and `link_delay_ms` in the metrics
+  snapshot reports how much later than the best case recent frames arrived.
+  The phone and desktop clocks are unrelated, so absolute latency needs a
+  round trip; the UI does not display `link_delay_ms` yet.
 - The OBS plugin is built and tested on Linux. The CMake file supports Windows
   and macOS but neither is exercised in CI.
 - iOS is not supported and is unlikely to be: it has no equivalent of AOA.

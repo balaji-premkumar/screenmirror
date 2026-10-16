@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Global references for coordinating the pipeline
+/// Set when the desktop asked for a keyframe; the encoder thread takes it.
+pub static KEYFRAME_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 pub static USB_ACTIVE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static USB_HANDLE: Lazy<Mutex<Option<i32>>> = Lazy::new(|| Mutex::new(None));
 
@@ -229,6 +232,10 @@ pub fn start_usb_loop(fd: i32) {
                     if let Ok(text) = std::str::from_utf8(&msg[..msg.len() - 1]) {
                         let trimmed = text.trim();
                         if trimmed.is_empty() {
+                            continue;
+                        }
+                        if trimmed == mirror_protocol::KEYFRAME_REQUEST {
+                            KEYFRAME_REQUESTED.store(true, AtomicOrdering::Release);
                             continue;
                         }
                         if let Ok(mut lock) = crate::api::LATEST_CONFIG.lock() {
