@@ -72,7 +72,13 @@ CONFIG_DIR="$HOME/.config/obs-studio/plugins"
 # Legacy OBS
 LEGACY_DIR="$HOME/.obs-studio/plugins"
 
-if [ -d "$(dirname "$FLATPAK_DIR")" ]; then
+# Snap OBS (XDG_CONFIG_HOME is remapped into the snap's common dir)
+SNAP_DIR="$HOME/snap/obs-studio/common/.config/obs-studio/plugins"
+
+if [ -d "$(dirname "$SNAP_DIR")" ]; then
+    PLUGIN_DIR="$SNAP_DIR"
+    echo "✓ Detected Snap OBS install"
+elif [ -d "$(dirname "$FLATPAK_DIR")" ]; then
     PLUGIN_DIR="$FLATPAK_DIR"
     echo "✓ Detected Flatpak OBS install"
 elif [ -d "$(dirname "$CONFIG_DIR")" ]; then

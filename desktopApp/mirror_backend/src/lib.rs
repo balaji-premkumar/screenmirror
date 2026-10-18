@@ -122,7 +122,7 @@ pub fn init() -> Result<(), String> {
         return Ok(());
     }
 
-    let trbuff = sinks::shared_mem::TripleBufferManager::create("obs_mirror_buffer")
+    let trbuff = sinks::shared_mem::TripleBufferManager::create("snap.obs-studio.mirror_video")
         .map_err(|e| e.to_string())?;
 
     if let Ok(mut tb) = TRIPLE_BUFFER.lock() {

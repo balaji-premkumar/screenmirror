@@ -7,7 +7,8 @@
  *
  * Cross-platform: POSIX shared memory on Linux/macOS, named file mappings
  * on Windows. The Windows mapping names match what the Rust side creates:
- *   video: "obs_mirror_buffer"   (shared_memory crate, os_id verbatim)
+ *   video: "snap.obs-studio.mirror_video" (shared_memory crate, os_id verbatim;
+ *          the prefix is what the Snap OBS AppArmor profile allows)
  *   audio: "mirror_obs_audio"    (CreateFileMappingA in obs_feed.rs)
  */
 
@@ -33,11 +34,11 @@ OBS_MODULE_AUTHOR("Mirror Team")
 OBS_MODULE_USE_DEFAULT_LOCALE("mirror-source", "en-US")
 
 /* ── Shared memory contract — MUST match shared_mem.rs / obs_feed.rs ────── */
-#define SHM_NAME             "obs_mirror_buffer"
+#define SHM_NAME             "snap.obs-studio.mirror_video"
 #ifdef _WIN32
 #  define AUDIO_SHM_NAME     "mirror_obs_audio"
 #else
-#  define AUDIO_SHM_NAME     "/mirror_obs_audio"
+#  define AUDIO_SHM_NAME     "/snap.obs-studio.mirror_audio"
 #endif
 #define CONTROL_SIZE         64
 #define SLOT_HEADER_SIZE     64
@@ -309,8 +310,11 @@ static void *audio_thread(void *arg)
 
         pthread_mutex_lock(&ctx->audio_lock);
 
-        if (!ctx->audio_shm.open) {
-            sleep_ms = 50;
+        /* Retried here, not only alongside the video ring: the video ring
+         * can be live while the audio one did not exist yet. */
+        if (!ctx->audio_shm.open &&
+            !shm_map_open(&ctx->audio_shm, AUDIO_SHM_NAME, AUDIO_SHM_SIZE)) {
+            sleep_ms = 500;
             goto next;
         }
 
@@ -600,7 +604,9 @@ static void mirror_video_tick(void *data, float seconds)
     uint64_t ts = fhdr->timestamp;
     uint32_t data_size = fhdr->data_size;
 
-    if (w == 0 || h == 0 || w > MAX_WIDTH || h > MAX_HEIGHT)
+    /* Bound the pixel count, not each side: a portrait phone sends e.g.
+     * 1440x2560, taller than MAX_HEIGHT but well inside the slot. */
+    if (w == 0 || h == 0 || (uint64_t)w * h > (uint64_t)MAX_WIDTH * MAX_HEIGHT)
         return;
     if (data_size > ctx->pixel_buf_size)
         return;

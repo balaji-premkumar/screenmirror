@@ -69,6 +69,16 @@ pub const AOA_VERSION: &str = "2.0";
 /// confused with a settings message.
 pub const KEYFRAME_REQUEST: &str = r#"{"cmd":"keyframe"}"#;
 
+/// Sent by the receiver once a second while it holds the link.
+///
+/// An accessory fd stays open after the desktop app quits — the phone is still
+/// in accessory mode — so a successful write proves nothing. Silence on this
+/// channel is how the phone learns nobody is reading and stops capturing.
+pub const HEARTBEAT: &str = r#"{"cmd":"ping"}"#;
+
+/// How often the receiver sends [`HEARTBEAT`].
+pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
+
 /// What a frame carries.
 ///
 /// The discriminants are the bytes on the wire; do not renumber them without

@@ -13,11 +13,12 @@ jobs:
 
       # `librt-dev` does not exist as a package — librt is part of glibc and is
       # linked by name in CMakeLists.txt. Asking for it made this step fail on
-      # a fresh runner image.
+      # a fresh runner image. Newer libobs-dev requires SIMDe headers at
+      # configure time without depending on them.
       - name: Install libobs
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libobs-dev
+          sudo apt-get install -y build-essential cmake libobs-dev libsimde-dev
 
       - name: Build
         working-directory: desktopApp

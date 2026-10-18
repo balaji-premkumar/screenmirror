@@ -46,6 +46,12 @@ pub fn get_connection_state() -> String {
         match &*state {
             crate::usb_loop::AoaState::Idle => "idle".to_string(),
             crate::usb_loop::AoaState::WaitingForHost => "waiting".to_string(),
+            // Linked, but the desktop app stopped answering (closed or hung).
+            crate::usb_loop::AoaState::Connected | crate::usb_loop::AoaState::Streaming
+                if crate::usb_loop::host_silent() =>
+            {
+                "waiting".to_string()
+            }
             crate::usb_loop::AoaState::Connected => "connected".to_string(),
             crate::usb_loop::AoaState::Streaming => "streaming".to_string(),
             crate::usb_loop::AoaState::Error(msg) => format!("error:{}", msg),

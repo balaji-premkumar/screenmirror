@@ -101,7 +101,7 @@ export function installMockBridge(initial: Scene = 'none') {
       return 0;
     },
     toggleAutoReconnect: () => ({ success: true }),
-    syncConfig: (data: { command: 'start' | 'stop' }) => {
+    syncConfig: (data: { command: 'start' | 'stop' | 'options' }) => {
       clearTimeout(waitingTimer);
       if (data.command === 'start') {
         log('usb.streaming.config_sent', 'SUCCESS', 'Settings sent (96 bytes).');

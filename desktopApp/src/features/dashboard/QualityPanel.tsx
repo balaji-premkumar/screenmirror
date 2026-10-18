@@ -21,6 +21,12 @@ const AUDIO_SOURCES = [
   { value: 'Mute All', labelKey: 'settings.audio.mute' },
 ] as const;
 
+const ORIENTATIONS = [
+  { value: 'Auto', labelKey: 'settings.orientation.auto' },
+  { value: 'Portrait', labelKey: 'settings.orientation.portrait' },
+  { value: 'Landscape', labelKey: 'settings.orientation.landscape' },
+] as const;
+
 interface QualityPanelProps {
   session: Session;
   isMirroring: boolean;
@@ -110,16 +116,32 @@ export function QualityPanel({ session, isMirroring }: QualityPanelProps) {
               onChange={(v) => session.update('bitrate', v)}
             />
           </Row>
-          <Row label={t('settings.audio')}>
-            <Segmented
-              label={t('settings.audio')}
-              value={config.audioSource}
-              options={AUDIO_SOURCES.map((s) => ({ value: s.value, label: t(s.labelKey) }))}
-              onChange={(v) => session.update('audioSource', v)}
-            />
-          </Row>
         </div>
       </details>
+
+      {/* Applied to a running capture straight away, so kept out of the fold. */}
+      <div className="mt-6 space-y-4 rounded-2xl border border-line bg-panel p-5">
+        <Row label={t('settings.orientation')}>
+          <div>
+            <Segmented
+              label={t('settings.orientation')}
+              value={config.orientation}
+              options={ORIENTATIONS.map((o) => ({ value: o.value, label: t(o.labelKey) }))}
+              onChange={(v) => session.update('orientation', v)}
+            />
+            <p className="mt-2 text-sm text-muted">{t('settings.orientation.hint')}</p>
+          </div>
+        </Row>
+        <Row label={t('settings.audio')}>
+          <Segmented
+            label={t('settings.audio')}
+            value={config.audioSource}
+            options={AUDIO_SOURCES.map((s) => ({ value: s.value, label: t(s.labelKey) }))}
+            onChange={(v) => session.update('audioSource', v)}
+          />
+        </Row>
+        <p className="text-sm text-muted">{t('settings.live')}</p>
+      </div>
     </section>
   );
 }

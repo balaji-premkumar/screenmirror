@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react';
 import LogoIcon from '@/components/ui/LogoIcon';
+import { tryCall } from '@/services/rpc';
 import { useT } from '@/i18n';
 import { PlayerState, parseDevice, type StartupChecks } from '@/types';
 import { HealthPanel } from './HealthPanel';
@@ -24,8 +26,17 @@ interface DashboardProps {
  * them. The order on screen follows the order of the task: see what is
  * happening, choose quality, check the stream is healthy.
  */
-export function Dashboard({ startupChecks }: DashboardProps) {
+export function Dashboard({ startupChecks: initialChecks }: DashboardProps) {
   const t = useT();
+  const [startupChecks, setStartupChecks] = useState(initialChecks);
+
+  // The loader may have given up on the backend (slow startup) or OBS may have
+  // been installed since. Ask again once, so the sink controls are not hidden
+  // for the life of the window by a stale "missing".
+  useEffect(() => {
+    if (initialChecks.ffplayOk && initialChecks.obsInstalled && initialChecks.obsPluginInstalled) return;
+    void tryCall('getStartupChecks', { fallback: initialChecks }).then(setStartupChecks);
+  }, [initialChecks]);
   const status = useStatusPolling(startupChecks.driverOk);
   const fps = status.metrics.fps_actual;
   const session = useSession(status.isConnected, fps);

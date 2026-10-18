@@ -220,7 +220,7 @@ pub unsafe extern "C" fn sync_config(json: *const libc::c_char) -> i32 {
         .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from));
 
     if let Ok(mut config) = pipeline::receiver::PENDING_CONFIG.lock() {
-        *config = Some(s.to_string());
+        config.push_back(s.to_string());
     }
 
     match command.as_deref() {

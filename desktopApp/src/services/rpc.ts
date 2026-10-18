@@ -35,7 +35,7 @@ export interface RpcMethods {
   triggerHandshake: (params: { vid: number; pid: number }) => number;
   toggleAutoReconnect: (params: { enabled: boolean }) => Ack;
   toggleObsFeed: (params: { enabled: boolean }) => Ack;
-  syncConfig: (params: Partial<StreamConfig> & { command: 'start' | 'stop' }) => Ack;
+  syncConfig: (params: Partial<StreamConfig> & { command: 'start' | 'stop' | 'options' }) => Ack;
   disconnectDevice: () => number;
   startPlayer: () => Ack;
   stopPlayer: () => Ack;

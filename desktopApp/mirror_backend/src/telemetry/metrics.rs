@@ -65,10 +65,18 @@ impl MetricsManager {
         self.total_usb_bytes += bytes as u64;
     }
 
+    /// A decoded frame. Only latency and bytes: frames are counted on
+    /// arrival ([`Self::record_video_packet`]), because nothing is decoded
+    /// unless the OBS feed or the player wants it.
     pub fn record_frame(&mut self, bytes: usize, latency: u64) {
         self.total_bytes += bytes as u64;
-        self.frame_count += 1;
         self.current_latency = latency;
+    }
+
+    /// A video packet received from the phone. This is what the dashboard's
+    /// fps reports, and what tells it the phone is mirroring.
+    pub fn record_video_packet(&mut self) {
+        self.frame_count += 1;
     }
 
     pub fn record_link_delay(&mut self, ms: u64) {

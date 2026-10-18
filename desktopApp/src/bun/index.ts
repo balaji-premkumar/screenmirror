@@ -63,6 +63,14 @@ async function mainViewUrl(): Promise<string> {
   return 'views://mainview/index.html';
 }
 
+// WebKitGTK's DMA-BUF renderer misses repaints on Wayland, notably with
+// hybrid/NVIDIA GPUs: the page scrolls and the metrics update, but the window
+// does not redraw until it is resized. The shared-memory renderer does not.
+// Set here as well as in package.json's scripts, for launches that bypass them.
+if (process.platform === 'linux') {
+  process.env.WEBKIT_DISABLE_DMABUF_RENDERER ??= '1';
+}
+
 new BrowserWindow({
   title: 'Mirror',
   url: await mainViewUrl(),

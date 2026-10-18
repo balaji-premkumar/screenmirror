@@ -1,7 +1,7 @@
 //! OBS Feed Module
 //!
 //! Video frames reach OBS through the triple-buffer segment owned by
-//! `shared_mem::TripleBufferManager` (os id `obs_mirror_buffer`) — the OBS
+//! `shared_mem::TripleBufferManager` (os id `snap.obs-studio.mirror_video`) — the OBS
 //! plugin (`obs_plugin/mirror_source.c`) maps that segment directly.
 //!
 //! This module owns the *audio* ring shared with the plugin and the
@@ -63,8 +63,11 @@ static AUDIO_SHMEM: Lazy<Mutex<Option<AudioShmem>>> = Lazy::new(|| Mutex::new(No
 // POSIX shared memory works the same on macOS as on Linux, and the OBS plugin
 // already takes the POSIX branch there — only this side was gated, which left
 // macOS with video but silently no audio.
+//
+// The `snap.obs-studio.` prefix is the only /dev/shm name the Snap OBS's
+// AppArmor profile lets it open; other installs do not care what it is.
 #[cfg(unix)]
-const AUDIO_SHM_NAME: &[u8] = b"/mirror_obs_audio\0";
+const AUDIO_SHM_NAME: &[u8] = b"/snap.obs-studio.mirror_audio\0";
 
 #[cfg(target_os = "windows")]
 mod win {
@@ -102,7 +105,10 @@ mod win {
 pub fn init_audio() -> bool {
     #[cfg(unix)]
     unsafe {
-        libc::shm_unlink(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char);
+        // Reuse the segment rather than unlink and recreate it, as the video
+        // ring does: an OBS that is already running keeps its mapping of the
+        // old inode and would play silence forever. The new session id below
+        // is what tells it to resync.
         let fd = libc::shm_open(
             AUDIO_SHM_NAME.as_ptr() as *const libc::c_char,
             libc::O_CREAT | libc::O_RDWR,
@@ -224,8 +230,8 @@ pub fn cleanup() {
             #[cfg(unix)]
             unsafe {
                 libc::munmap(shm.ptr as *mut libc::c_void, AUDIO_SHM_SIZE);
+                // Not unlinked: see init_audio.
                 libc::close(shm.fd);
-                libc::shm_unlink(AUDIO_SHM_NAME.as_ptr() as *const libc::c_char);
             }
             #[cfg(target_os = "windows")]
             unsafe {

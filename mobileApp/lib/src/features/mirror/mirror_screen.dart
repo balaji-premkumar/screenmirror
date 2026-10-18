@@ -59,6 +59,7 @@ class _MirrorScreenState extends State<MirrorScreen> with TickerProviderStateMix
         'awaitingApproval' => l10n.statusWaitingForApproval,
         'captureDeclined' => l10n.statusCaptureDeclined,
         'ready' => l10n.statusReadyForCapture,
+        'hostSilent' => l10n.statusHostSilent,
         _ when _controller.phase == MirrorPhase.error && !_controller.nativeReady =>
           l10n.statusNativeMissing,
         _ => describePhase(l10n, _controller.phase),

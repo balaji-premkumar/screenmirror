@@ -17,6 +17,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -38,6 +39,7 @@ class MirrorForegroundService : Service() {
     private var drainThread: Thread? = null
 
     private var audioRecord: AudioRecord? = null
+    private var micRecord: AudioRecord? = null
     private var audioThread: Thread? = null
 
     /** All projection start/stop work runs here, one at a time. */
@@ -45,6 +47,16 @@ class MirrorForegroundService : Service() {
 
     @Volatile
     private var isRunning = false
+
+    // Current encoder geometry and rate, kept so a rotation can rebuild it.
+    private var encWidth = 0
+    private var encHeight = 0
+    private var encFps = 60
+    private var encBitrate = 0
+
+    // Desktop-chosen options. Values are the strings QualityPanel.tsx sends.
+    @Volatile private var orientationMode = "Auto" // Auto | Portrait | Landscape
+    @Volatile private var audioSource = "Game System" // Game System | Microphone | Game + Mic | Mute All
 
     @Volatile
     private var audioRunning = false
@@ -55,6 +67,11 @@ class MirrorForegroundService : Service() {
         const val EXTRA_DATA = "extra_data"
 
         const val AUDIO_SAMPLE_RATE = 48000
+
+        /** The running service, for live option changes from MainActivity. */
+        @Volatile
+        var active: MirrorForegroundService? = null
+            private set
 
         init {
             System.loadLibrary("rust_lib_stream_mobile_app")
@@ -68,6 +85,36 @@ class MirrorForegroundService : Service() {
     private external fun takeKeyframeRequest(): Boolean
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        active = this
+    }
+
+    private fun devicePortrait(): Boolean =
+        resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+
+    private fun wantPortrait(devicePortrait: Boolean): Boolean = when (orientationMode) {
+        "Portrait" -> true
+        "Landscape" -> false
+        else -> devicePortrait
+    }
+
+    /** Orientation lock and audio source, changed while capturing. */
+    fun applyOptions(orientation: String?, audio: String?) {
+        projectionExecutor.execute {
+            if (orientation != null && orientation != orientationMode) {
+                orientationMode = orientation
+                matchOrientation(wantPortrait(devicePortrait()))
+            }
+            if (audio != null && audio != audioSource) {
+                audioSource = audio
+                val projection = mediaProjection ?: return@execute
+                stopAudioCapture()
+                startAudioCapture(projection)
+            }
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP_MIRRORING") {
@@ -87,6 +134,8 @@ class MirrorForegroundService : Service() {
         val resStr = intent?.getStringExtra("resolution") ?: "1080p"
         val bitStr = intent?.getStringExtra("bitrate") ?: "8 Mbps"
         val fpsStr = intent?.getStringExtra("fps") ?: "60"
+        orientationMode = intent?.getStringExtra("orientation") ?: orientationMode
+        audioSource = intent?.getStringExtra("audioSource") ?: audioSource
 
         createNotificationChannel()
 
@@ -211,9 +260,9 @@ class MirrorForegroundService : Service() {
             }
         }, null)
 
-        // Use Configuration to safely detect orientation from a Service context
-        val orientation = resources.configuration.orientation
-        val isPortrait = orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        // Use Configuration to safely detect orientation from a Service context,
+        // unless the desktop locked it.
+        val isPortrait = wantPortrait(devicePortrait())
 
         var targetWidth = when (resStr) {
             "720p" -> 1280
@@ -243,59 +292,11 @@ class MirrorForegroundService : Service() {
         // rejects the format and "120 fps" never leaves the phone.
         fps = clampFpsToEncoderCaps(targetWidth, targetHeight, fps)
 
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, targetWidth, targetHeight)
-        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-
-        // Real-time operation at the requested frame rate. Without
-        // KEY_OPERATING_RATE / max-fps-to-encoder most devices schedule the
-        // codec for 30/60 fps regardless of KEY_FRAME_RATE.
-        format.setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime
-        format.setInteger(MediaFormat.KEY_LATENCY, 0)  // lowest latency
-        format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
-        format.setFloat("max-fps-to-encoder", fps.toFloat())
-
-        // Re-emit the last frame when the screen is static so the link never
-        // goes silent (the desktop drops idle links after 5 s). 100 ms → 10 fps floor.
-        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
-
-        // Prepend VPS/SPS/PPS to every keyframe so the desktop decoder can
-        // (re)initialize even if the very first config packet was lost.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
-        }
-
-        try {
-            mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-            // Constant bitrate keeps the USB writer fed at an even rate. The
-            // usual VBR default spikes on scene changes, and those spikes are
-            // what overflow the send queue. Not every encoder offers it.
-            val supportsCbr = mediaCodec?.codecInfo
-                ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-                ?.encoderCapabilities
-                ?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true
-            if (supportsCbr) {
-                format.setInteger(
-                    MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
-                )
-            }
-            mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        } catch (e: Exception) {
-            android.util.Log.e("MirrorService", "Encoder configure failed (${e.message}) — retrying without rate hints")
-            // Some vendor codecs reject operating-rate hints; retry without them.
-            try {
-                mediaCodec?.release()
-                format.setInteger(MediaFormat.KEY_OPERATING_RATE, 0)
-                mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-                mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            } catch (e2: Exception) {
-                android.util.Log.e("MirrorService", "Encoder configure failed permanently: ${e2.message}")
-                stopSelf()
-                return
-            }
+        encFps = fps
+        encBitrate = bitrate
+        mediaCodec = createEncoder(targetWidth, targetHeight) ?: run {
+            stopSelf()
+            return
         }
         inputSurface = mediaCodec?.createInputSurface()
         mediaCodec?.start()
@@ -314,6 +315,118 @@ class MirrorForegroundService : Service() {
         drainThread = Thread { drainEncoder() }.also { it.start() }
 
         startAudioCapture(projection)
+    }
+
+    /** Configured (not started) HEVC encoder at the given size, or null. */
+    private fun createEncoder(width: Int, height: Int): MediaCodec? {
+        var codec: MediaCodec? = null
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, width, height)
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+        format.setInteger(MediaFormat.KEY_BIT_RATE, encBitrate)
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, encFps)
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+
+        // Real-time operation at the requested frame rate. Without
+        // KEY_OPERATING_RATE / max-fps-to-encoder most devices schedule the
+        // codec for 30/60 fps regardless of KEY_FRAME_RATE.
+        format.setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime
+        format.setInteger(MediaFormat.KEY_LATENCY, 0)  // lowest latency
+        format.setInteger(MediaFormat.KEY_OPERATING_RATE, encFps)
+        format.setFloat("max-fps-to-encoder", encFps.toFloat())
+
+        // Re-emit the last frame when the screen is static so the link never
+        // goes silent (the desktop drops idle links after 5 s). 100 ms → 10 fps floor.
+        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+
+        // Prepend VPS/SPS/PPS to every keyframe so the desktop decoder can
+        // (re)initialize even if the very first config packet was lost.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+        }
+
+        try {
+            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+            // Constant bitrate keeps the USB writer fed at an even rate. The
+            // usual VBR default spikes on scene changes, and those spikes are
+            // what overflow the send queue. Not every encoder offers it.
+            val supportsCbr = codec?.codecInfo
+                ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+                ?.encoderCapabilities
+                ?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true
+            if (supportsCbr) {
+                format.setInteger(
+                    MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                )
+            }
+            codec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        } catch (e: Exception) {
+            android.util.Log.e("MirrorService", "Encoder configure failed (${e.message}) — retrying without rate hints")
+            // Some vendor codecs reject operating-rate hints; retry without them.
+            try {
+                codec?.release()
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, 0)
+                codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+                codec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e2: Exception) {
+                android.util.Log.e("MirrorService", "Encoder configure failed permanently: ${e2.message}")
+                return null
+            }
+        }
+        encWidth = width
+        encHeight = height
+        return codec
+    }
+
+    /**
+     * The phone rotated while mirroring. VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+     * letterboxes a landscape screen into a portrait surface (and vice
+     * versa), so the stream shrinks unless the encoder is rebuilt with the
+     * dimensions swapped. The VirtualDisplay is kept — a projection may only
+     * create one on Android 14+ — and just retargeted at the new surface.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val portrait = wantPortrait(newConfig.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT)
+        projectionExecutor.execute { matchOrientation(portrait) }
+    }
+
+    private fun matchOrientation(portrait: Boolean) {
+        val display = virtualDisplay ?: return
+        if (!isRunning || (encHeight > encWidth) == portrait) return
+        val width = encHeight
+        val height = encWidth
+
+        isRunning = false
+        try {
+            drainThread?.join(500)
+        } catch (_: Exception) {
+        }
+        drainThread = null
+        display.surface = null
+        try {
+            mediaCodec?.stop()
+        } catch (_: Exception) {
+        }
+        mediaCodec?.release()
+        inputSurface?.release()
+
+        val codec = createEncoder(width, height)
+        if (codec == null) {
+            mediaCodec = null
+            inputSurface = null
+            stopSelf()
+            return
+        }
+        mediaCodec = codec
+        inputSurface = codec.createInputSurface()
+        codec.start()
+        display.resize(width, height, resources.displayMetrics.densityDpi)
+        display.surface = inputSurface
+
+        isRunning = true
+        android.util.Log.i("MirrorService", "Rotated: encoder now ${width}x${height}")
+        drainThread = Thread { drainEncoder() }.also { it.start() }
     }
 
     private fun clampFpsToEncoderCaps(width: Int, height: Int, requestedFps: Int): Int {
@@ -405,11 +518,18 @@ class MirrorForegroundService : Service() {
     }
 
     /**
-     * Capture device audio (media/game output) via AudioPlaybackCapture and
-     * push it to the USB pipeline as f32 LE mono 48 kHz — the wire format the
+     * Capture audio per the desktop's audio source — device output via
+     * AudioPlaybackCapture, the microphone, both mixed, or nothing — and push
+     * it to the USB pipeline as f32 LE mono 48 kHz, the wire format the
      * desktop plays back and forwards to OBS.
      */
     private fun startAudioCapture(projection: MediaProjection) {
+        val wantSystem = audioSource == "Game System" || audioSource == "Game + Mic"
+        val wantMic = audioSource == "Microphone" || audioSource == "Game + Mic"
+        if (!wantSystem && !wantMic) {
+            android.util.Log.i("MirrorService", "Audio muted by the desktop")
+            return
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             android.util.Log.w("MirrorService", "AudioPlaybackCapture requires Android 10+ — audio disabled")
             return
@@ -426,12 +546,6 @@ class MirrorForegroundService : Service() {
         }
 
         try {
-            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
-
             val audioFormat = AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
                 .setSampleRate(AUDIO_SAMPLE_RATE)
@@ -444,38 +558,72 @@ class MirrorForegroundService : Service() {
                 AudioFormat.ENCODING_PCM_FLOAT
             ).coerceAtLeast(4096)
 
-            val record = AudioRecord.Builder()
-                .setAudioFormat(audioFormat)
-                .setBufferSizeInBytes(minBuf * 2)
-                .setAudioPlaybackCaptureConfig(captureConfig)
-                .build()
+            val system = if (wantSystem) {
+                val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                    .build()
+                AudioRecord.Builder()
+                    .setAudioFormat(audioFormat)
+                    .setBufferSizeInBytes(minBuf * 2)
+                    .setAudioPlaybackCaptureConfig(captureConfig)
+                    .build()
+            } else null
 
-            record.startRecording()
-            audioRecord = record
+            val mic = if (wantMic) {
+                AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(audioFormat)
+                    .setBufferSizeInBytes(minBuf * 2)
+                    .build()
+            } else null
+
+            system?.startRecording()
+            mic?.startRecording()
+            audioRecord = system
+            micRecord = mic
             audioRunning = true
 
             audioThread = Thread {
                 val floats = FloatArray(1024)
+                val micFloats = FloatArray(floats.size)
                 // Both buffers are allocated once and reused; only the first
                 // `read * 4` bytes are handed across the JNI boundary.
                 val out = ByteArray(floats.size * 4)
                 val bytes = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
                 while (audioRunning) {
-                    val read = record.read(floats, 0, floats.size, AudioRecord.READ_BLOCKING)
-                    if (read > 0) {
-                        bytes.clear()
-                        for (i in 0 until read) bytes.putFloat(floats[i])
-                        pushAudioToUsb(out, read * 4, System.nanoTime() / 1000)
-                    } else if (read < 0) {
+                    // One clock drives the stream: device output when captured,
+                    // otherwise the mic. The other source is read without
+                    // blocking and mixed in.
+                    // ponytail: no drift correction between the two clocks;
+                    // the mic's own buffer overruns and drops if it runs fast.
+                    val read = if (system != null) {
+                        system.read(floats, 0, floats.size, AudioRecord.READ_BLOCKING)
+                    } else {
+                        mic!!.read(floats, 0, floats.size, AudioRecord.READ_BLOCKING)
+                    }
+                    if (read < 0) {
                         android.util.Log.w("MirrorService", "AudioRecord read error: $read")
                         break
                     }
+                    if (read == 0) continue
+                    if (system != null && mic != null) {
+                        val got = mic.read(micFloats, 0, read, AudioRecord.READ_NON_BLOCKING)
+                        for (i in 0 until got) {
+                            floats[i] = (floats[i] + micFloats[i]).coerceIn(-1f, 1f)
+                        }
+                    }
+                    bytes.clear()
+                    for (i in 0 until read) bytes.putFloat(floats[i])
+                    pushAudioToUsb(out, read * 4, System.nanoTime() / 1000)
                 }
             }.also { it.start() }
 
-            android.util.Log.i("MirrorService", "System audio capture started (48kHz f32 mono)")
+            android.util.Log.i("MirrorService", "Audio capture started: $audioSource (48kHz f32 mono)")
         } catch (e: Exception) {
             android.util.Log.e("MirrorService", "Audio capture failed: ${e.message}")
+            stopAudioCapture()
         }
     }
 
@@ -486,15 +634,18 @@ class MirrorForegroundService : Service() {
         } catch (_: Exception) {
         }
         audioThread = null
-        try {
-            audioRecord?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {
+        for (record in listOf(audioRecord, micRecord)) {
+            try {
+                record?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                record?.release()
+            } catch (_: Exception) {
+            }
         }
         audioRecord = null
+        micRecord = null
     }
 
     private fun stopProjection() {
@@ -544,6 +695,7 @@ class MirrorForegroundService : Service() {
 
     override fun onDestroy() {
         android.util.Log.i("MirrorService", "Destroying service...")
+        active = null
         // Let any in-flight projection setup finish before tearing it down,
         // otherwise stopProjection() can race a half-built session and leak
         // the encoder or the VirtualDisplay.
