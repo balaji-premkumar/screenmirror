@@ -18,8 +18,10 @@ on:
         type: string
         default: stable
 
+# The event is in the group so a push to the branch a release runs from cannot
+# cancel the release's build (a called workflow is grouped as its own run).
 concurrency:
-  group: desktop-${{ github.ref }}
+  group: desktop-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -55,7 +57,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev pkg-config \
-            libwebkit2gtk-4.1-dev cmake libobs-dev
+            libwebkit2gtk-4.1-dev cmake libobs-dev libsimde-dev
 
       - uses: ./.github/actions/setup-ffmpeg
         if: runner.os != 'macOS'

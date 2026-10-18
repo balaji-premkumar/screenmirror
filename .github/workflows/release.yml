@@ -1,21 +1,53 @@
 name: Release
 
+# Manual only: a release is cut from the Actions tab (Run workflow), never by
+# a push or a tag. The tag is created by the publish step, on the commit the
+# run was started from.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Tag to create, e.g. v1.2.0
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  # Fail before an hour of builds, not after: a bad name or a reused tag would
+  # only be caught by the publish step.
+  validate:
+    name: Check the version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version tag like v1.2.0"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Tag $VERSION already exists"
+            exit 1
+          fi
+
   # Nothing is published from a tag that does not pass the ordinary checks.
   checks:
+    needs: validate
     uses: ./.github/workflows/check.yml
 
   mobile:
     needs: checks
     uses: ./.github/workflows/mobile.yml
+    # The signing key comes from the ANDROID_KEYSTORE_* repository secrets.
+    secrets: inherit
     with:
       require_release_signing: true
 
@@ -44,6 +76,8 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/ScreenMirror-android/*.apk
             artifacts/ScreenMirror-linux-x64/**/*
