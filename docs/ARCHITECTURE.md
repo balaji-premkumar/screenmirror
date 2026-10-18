@@ -187,6 +187,5 @@ dialog was still on screen.
   snapshot reports how much later than the best case recent frames arrived.
   The phone and desktop clocks are unrelated, so absolute latency needs a
   round trip; the UI does not display `link_delay_ms` yet.
-- The OBS plugin is built and tested on Linux. Windows and macOS have no CI build of it (it needs the OBS SDK there), so nothing ships for them; the macOS install layout is also unconfirmed. The CMake file supports Windows
-  and macOS but neither is exercised in CI.
+- The OBS plugin is built in CI on all three systems (`.github/actions/build-obs-plugin`), against libobs 30.0.2 so it loads in OBS 30 and later. Windows and macOS builds compile against OBS's source headers rather than an SDK, and have only been tested by compiling: it installs to `%ProgramData%\obs-studio\plugins` on Windows and as a `mirror-source.plugin` bundle on macOS, the paths OBS 29+ reads.
 - iOS is not supported and is unlikely to be: it has no equivalent of AOA.

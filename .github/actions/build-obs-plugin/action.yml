@@ -1,0 +1,98 @@
+name: Build the OBS plugin
+description: >
+  Builds desktopApp/obs_plugin on the runner's OS. Linux uses the distro's
+  libobs-dev. Windows and macOS have no libobs package, so they compile
+  against libobs's headers from the OBS source at OBS_VERSION; Windows links
+  import libraries generated from that release's obs.dll and w32-pthreads.dll,
+  and macOS links nothing (OBS supplies libobs when it loads the plugin).
+  OBS refuses a plugin built against a newer libobs than its own, so
+  OBS_VERSION is the oldest OBS the plugin supports: 30.0.2 is also what
+  Ubuntu 24.04's libobs-dev is, so all three platforms load in OBS 30 and up.
+
+outputs:
+  path:
+    description: The built plugin file
+    value: ${{ steps.out.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake libobs-dev libsimde-dev
+        cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -DCMAKE_BUILD_TYPE=Release
+        cmake --build desktopApp/obs_plugin/build --config Release
+
+    # libobs's public headers include the generated obsconfig.h, but read
+    # nothing from it that a plugin uses beyond these two.
+    - name: libobs headers (Windows, macOS)
+      if: runner.os != 'Linux'
+      shell: bash
+      env:
+        OBS_VERSION: 30.0.2
+      run: |
+        set -euo pipefail
+        obs="$RUNNER_TEMP/obs"
+        mkdir -p "$obs/src" "$obs/cfg"
+        curl -fsSL --retry 5 "https://github.com/obsproject/obs-studio/archive/refs/tags/$OBS_VERSION.tar.gz" \
+          | tar -xz -C "$obs/src" --strip-components=1 \
+              "obs-studio-$OBS_VERSION/libobs" "obs-studio-$OBS_VERSION/deps/w32-pthreads"
+        printf '#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n' > "$obs/cfg/obsconfig.h"
+        echo "OBS_DIR=$obs" >> "$GITHUB_ENV"
+        echo "OBS_VERSION=$OBS_VERSION" >> "$GITHUB_ENV"
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      if: runner.os == 'Windows'
+
+    # The release zip has the DLLs but no import libraries; dumpbin lists the
+    # exports and lib turns that list into one.
+    - name: Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $obs = $env:OBS_DIR
+        Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION.zip" -OutFile "$obs/obs.zip"
+        Expand-Archive "$obs/obs.zip" -DestinationPath "$obs/bin"
+        $libs = foreach ($name in 'obs', 'w32-pthreads') {
+          $dll = Get-ChildItem "$obs/bin" -Recurse -Filter "$name.dll" | Where-Object FullName -match '64bit' | Select-Object -First 1
+          if (-not $dll) { throw "$name.dll not found in the OBS zip" }
+          $exports = dumpbin /nologo /exports $dll.FullName |
+            Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          Set-Content "$obs/$name.def" (@("LIBRARY $name", 'EXPORTS') + $exports)
+          lib /nologo "/def:$obs/$name.def" /machine:x64 "/out:$obs/$name.lib" | Out-Null
+          "$obs/$name.lib"
+        }
+        $inc = "$obs/src/libobs;$obs/src/deps/w32-pthreads;$obs/cfg"
+        cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -A x64 `
+          "-DLIBOBS_INCLUDE_DIR=$inc" "-DLIBOBS_LIB=$($libs -join ';')"
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        cmake --build desktopApp/obs_plugin/build --config Release
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+    # One universal binary for Apple Silicon and Intel OBS. Homebrew's SIMDe
+    # stands in for the SSE intrinsics libobs's headers use on arm64.
+    - name: macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew install simde
+        cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -DCMAKE_BUILD_TYPE=Release \
+          "-DLIBOBS_INCLUDE_DIR=$OBS_DIR/src/libobs;$OBS_DIR/cfg;$(brew --prefix)/include" \
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+        cmake --build desktopApp/obs_plugin/build --config Release
+        lipo -info desktopApp/obs_plugin/build/mirror-source.so
+
+    - id: out
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Windows ]; then
+          echo "path=desktopApp/obs_plugin/build/Release/mirror-source.dll" >> "$GITHUB_OUTPUT"
+        else
+          echo "path=desktopApp/obs_plugin/build/mirror-source.so" >> "$GITHUB_OUTPUT"
+        fi
