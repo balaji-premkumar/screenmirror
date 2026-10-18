@@ -15,7 +15,7 @@
 //! |-------------------------|-----------------|--------------------|-------|
 //! | [`driver_status`]       | udev rule file  | probe via libusb   | always ready |
 //! | [`install_driver`]      | pkexec + udev   | libwdi or pnputil  | no-op |
-//! | [`obs_plugin_dir`]      | `~/.config/obs-studio` | `%APPDATA%` | `~/Library` |
+//! | [`obs_plugin_dir`]      | `~/.config/obs-studio` | `%ProgramData%` | `~/Library` |
 
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "windows", path = "windows.rs")]

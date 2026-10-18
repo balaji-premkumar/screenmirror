@@ -376,16 +376,20 @@ fn install_with_inf() -> i32 {
     }
 }
 
+/// `%APPDATA%\obs-studio` is OBS's config, created on first run. It says OBS
+/// is in use; the plugin itself does not go there.
 pub(super) fn obs_plugin_dir() -> Option<std::path::PathBuf> {
-    let root = obs_config_root()?;
-    root.exists().then(|| root.join("plugins"))
+    let config = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("obs-studio");
+    config.exists().then(default_obs_plugin_dir).flatten()
 }
 
+/// OBS 29+ loads third-party plugins from
+/// `%ProgramData%\obs-studio\plugins\<name>\bin\64bit`. It never looked in
+/// `%APPDATA%`, where this used to install them.
 pub(super) fn default_obs_plugin_dir() -> Option<std::path::PathBuf> {
-    Some(obs_config_root()?.join("plugins"))
-}
-
-/// OBS 28+ loads user plugins from `%APPDATA%\obs-studio`.
-fn obs_config_root() -> Option<std::path::PathBuf> {
-    Some(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("obs-studio"))
+    Some(
+        std::path::PathBuf::from(std::env::var_os("ProgramData")?)
+            .join("obs-studio")
+            .join("plugins"),
+    )
 }

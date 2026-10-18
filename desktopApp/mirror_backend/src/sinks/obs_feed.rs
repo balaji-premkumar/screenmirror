@@ -402,11 +402,23 @@ const PLUGIN_VERSION: &str = "3.0.0";
 
 const PLUGIN_BINARY: &str = crate::platform::obs_plugin_filename();
 
+/// Where OBS looks for the module inside its plugin directory: a `.plugin`
+/// bundle on macOS (the only form Apple Silicon builds load), `<name>/bin/64bit`
+/// elsewhere.
+#[cfg(target_os = "macos")]
+const MODULE_DIR: &str = "mirror-source.plugin";
+#[cfg(target_os = "macos")]
+const MODULE_BIN_DIR: &str = "Contents/MacOS";
+#[cfg(not(target_os = "macos"))]
+const MODULE_DIR: &str = "mirror-source";
+#[cfg(not(target_os = "macos"))]
+const MODULE_BIN_DIR: &str = "bin/64bit";
+
 /// Check whether our OBS plugin is already installed and up to date.
 pub fn check_plugin_installed() -> bool {
     if let Some(plugin_dir) = get_obs_plugin_dir() {
-        let base_path = format!("{}/mirror-source", plugin_dir);
-        let bin_path = format!("{}/bin/64bit/{}", base_path, PLUGIN_BINARY);
+        let base_path = format!("{}/{}", plugin_dir, MODULE_DIR);
+        let bin_path = format!("{}/{}/{}", base_path, MODULE_BIN_DIR, PLUGIN_BINARY);
         let version_path = format!("{}/version.txt", base_path);
 
         if !std::path::Path::new(&bin_path).exists() {
@@ -425,7 +437,7 @@ pub fn check_plugin_installed() -> bool {
     }
 }
 
-/// Build (Linux) or copy (Windows) and install the OBS plugin.
+/// Build (Linux, when none is bundled) or copy the bundled OBS plugin, and install it.
 /// Returns 0 on success, -1 on failure.
 pub fn install_plugin(project_root: &str) -> i32 {
     log_event!(codes::OBS_INSTALL_STARTED, "version" => PLUGIN_VERSION);
@@ -490,8 +502,13 @@ pub fn install_plugin(project_root: &str) -> i32 {
     };
 
     // Install to the OBS plugin directory
-    let base_install_dir = format!("{}/mirror-source", plugin_dir);
-    let bin_install_dir = format!("{}/bin/64bit", base_install_dir);
+    let base_install_dir = format!("{}/{}", plugin_dir, MODULE_DIR);
+    let bin_install_dir = format!("{}/{}", base_install_dir, MODULE_BIN_DIR);
+
+    // Earlier versions installed the Linux layout here too. Intel OBS still
+    // loads that path, so it would load the module twice.
+    #[cfg(target_os = "macos")]
+    let _ = std::fs::remove_dir_all(format!("{}/mirror-source", plugin_dir));
 
     if std::fs::create_dir_all(&bin_install_dir).is_err() {
         log_event!(codes::OBS_INSTALL_MKDIR_FAILED);
@@ -504,6 +521,13 @@ pub fn install_plugin(project_root: &str) -> i32 {
         log_event!(codes::OBS_INSTALL_COPY_FAILED, "error" => e);
         return -1;
     }
+
+    // The copy keeps the download's quarantine flag, and Gatekeeper then
+    // refuses to let OBS load an unsigned module.
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("xattr")
+        .args(["-d", "com.apple.quarantine", &dst])
+        .status();
 
     // Write version file
     let version_path = format!("{}/version.txt", base_install_dir);
