@@ -72,6 +72,12 @@ use mirror_protocol::hevc::extract_parameter_sets;
 /// USB thread, so it is a plain atomic rather than a lock.
 static ACCEPTING: AtomicBool = AtomicBool::new(false);
 
+/// Set when the parameter sets change mid-session — the phone rotated and
+/// rebuilt its encoder at the swapped size. ffplay keeps the window it opened
+/// with and letterboxes the new frames into it, so the session restarts
+/// ffplay with a fresh Matroska header instead.
+static RESTART: AtomicBool = AtomicBool::new(false);
+
 pub fn state() -> i32 {
     STATE.load(Ordering::Acquire)
 }
@@ -143,6 +149,13 @@ impl Queue {
         q.pop_front()
     }
 
+    fn push_front(&self, item: Media) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_front(item);
+    }
+
     fn clear(&self) {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -175,6 +188,19 @@ pub fn push_video(data: &[u8]) {
         *CSD.lock().unwrap_or_else(|e| e.into_inner()) = params;
         ARMED.store(true, Ordering::Release);
         QUEUE.wake();
+    } else if info.has_parameter_sets {
+        let params = extract_parameter_sets(data);
+        let mut csd = CSD.lock().unwrap_or_else(|e| e.into_inner());
+        if !params.is_empty() && *csd != params {
+            *csd = params;
+            drop(csd);
+            // Re-learn the size from the decoder; queued packets belong to the
+            // old stream, so this keyframe becomes the new session's first.
+            DIM_W.store(0, Ordering::Relaxed);
+            DIM_H.store(0, Ordering::Relaxed);
+            QUEUE.clear();
+            RESTART.store(true, Ordering::Release);
+        }
     }
     QUEUE.push(Media::Video {
         data: data.to_vec(),
@@ -503,6 +529,7 @@ pub fn start(project_root: &str) -> i32 {
     ARMED.store(false, Ordering::Release);
     DIM_W.store(0, Ordering::Relaxed);
     DIM_H.store(0, Ordering::Relaxed);
+    RESTART.store(false, Ordering::Relaxed);
     QUEUE.clear();
     ACCEPTING.store(true, Ordering::Release);
 
@@ -530,11 +557,25 @@ fn session_alive(my_gen: u64) -> bool {
 }
 
 fn run_session(project_root: String, my_gen: u64) {
+    // One ffplay per stream geometry; a rotation goes round again.
+    let mut restarted = false;
+    while play_once(&project_root, my_gen, restarted) {
+        restarted = true;
+        log_event!(codes::PLAYER_WAITING_FOR_KEYFRAME);
+    }
+    finish(my_gen);
+}
+
+/// Runs one ffplay process. True when it ended because the stream changed
+/// size and the caller should start another.
+fn play_once(project_root: &str, my_gen: u64, restarted: bool) -> bool {
+    RESTART.store(false, Ordering::Release);
+
     // ── Phase 1: wait until we can start cleanly ──
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if !session_alive(my_gen) {
-            return;
+            return false;
         }
         let dims_ready = DIM_W.load(Ordering::Acquire) > 0;
         if dims_ready && ARMED.load(Ordering::Acquire) {
@@ -542,29 +583,32 @@ fn run_session(project_root: String, my_gen: u64) {
         }
         if Instant::now() >= deadline {
             log_event!(codes::PLAYER_KEYFRAME_TIMEOUT);
-            finish(my_gen);
-            return;
+            return false;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    if restarted {
+        // ponytail: with the OBS feed on, a frame of the old size can still be
+        // in the decoder and report stale dimensions; the new keyframe
+        // overwrites them a frame later. Parse the SPS if 100 ms ever falls short.
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let width = DIM_W.load(Ordering::Acquire);
     let height = DIM_H.load(Ordering::Acquire);
 
     // ── Phase 2: launch ffplay and build the muxer ──
-    let mut child = match spawn_ffplay(&project_root) {
+    let mut child = match spawn_ffplay(project_root) {
         Ok(c) => c,
         Err(e) => {
             log_event!(codes::PLAYER_SPAWN_FAILED, "error" => e);
-            finish(my_gen);
-            return;
+            return false;
         }
     };
     let Some(stdin) = child.stdin.take() else {
         log_event!(codes::PLAYER_STDIN_UNAVAILABLE);
         let _ = child.kill();
-        finish(my_gen);
-        return;
+        return false;
     };
 
     let extradata = CSD.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -574,8 +618,7 @@ fn run_session(project_root: String, my_gen: u64) {
             log_event!(codes::PLAYER_MUXER_FAILED, "error" => e);
             let _ = child.kill();
             let _ = child.wait();
-            finish(my_gen);
-            return;
+            return false;
         }
     };
 
@@ -609,6 +652,11 @@ fn run_session(project_root: String, my_gen: u64) {
         let Some(item) = QUEUE.pop(Duration::from_millis(100)) else {
             continue;
         };
+        if RESTART.load(Ordering::Acquire) {
+            // The new stream's keyframe — keep it for the next ffplay.
+            QUEUE.push_front(item);
+            break;
+        }
 
         let res = match item {
             Media::Video { data, keyframe } => {
@@ -638,9 +686,14 @@ fn run_session(project_root: String, my_gen: u64) {
 
     // ── Teardown: trailer + close pipe, then reap the child ──
     drop(muxer);
+    let restart = RESTART.load(Ordering::Acquire) && session_alive(my_gen);
+    if restart {
+        // EOF alone leaves ffplay draining its buffer; the old window must go.
+        let _ = child.kill();
+    }
     let _ = child.wait();
     log_event!(codes::PLAYER_SESSION_ENDED);
-    finish(my_gen);
+    restart
 }
 
 /// Reset shared state, but only if no newer session has claimed it.

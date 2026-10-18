@@ -13,6 +13,10 @@ if (import.meta.env.DEV && params.has('mock')) {
 } else {
   // Initialize the Electrobun bridge for RPC and messaging
   const rpc = Electroview.defineRPC({
+    // The default is 1 s. The bridge reports ready before the backend has
+    // finished `native.init()`, so the startup checks used to time out, fall
+    // back to "nothing installed", and hide the player and OBS buttons.
+    maxRequestTime: 10_000,
     handlers: {
       requests: {
         // These would be requests FROM Bun TO View (currently unused)

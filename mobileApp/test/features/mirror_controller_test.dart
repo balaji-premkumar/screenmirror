@@ -189,6 +189,26 @@ void main() {
     expect(channel.calls, contains('stopService'));
   });
 
+  test('a silent desktop stops capture but keeps the link', () async {
+    // The accessory fd stays writable after the desktop app quits, so the
+    // missing heartbeat is the only sign nobody is reading.
+    await controller.start();
+    channel.handlers!.onAttached(1);
+    await Future<void>.delayed(Duration.zero);
+    channel.handlers!.onProjectionStarted();
+
+    native.state = 'waiting';
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    expect(controller.phase, MirrorPhase.linked);
+    expect(controller.statusOverrideKey, 'hostSilent');
+    expect(channel.calls, contains('stopService'));
+
+    native.state = 'connected';
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(controller.statusOverrideKey, isNull);
+  });
+
   test('a missing native library blocks streaming instead of failing silently',
       () async {
     final broken = MirrorController(

@@ -1,13 +1,36 @@
 use crate::api::METRICS;
 use crate::muxer::{contains_csd, Muxer, PopResult, UsbQueues};
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Global references for coordinating the pipeline
 /// Set when the desktop asked for a keyframe; the encoder thread takes it.
 pub static KEYFRAME_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// When the desktop last sent anything (ms since [`EPOCH`]). The accessory fd
+/// stays writable after the desktop app quits, so this — not write success —
+/// is what says the receiver is alive.
+static LAST_HOST_MSG_MS: AtomicU64 = AtomicU64::new(0);
+static EPOCH: Lazy<Instant> = Lazy::new(Instant::now);
+
+/// Four missed heartbeats. Generous because the desktop briefly drops and
+/// re-claims the interface after 5 s without data from an idle phone.
+const HOST_TIMEOUT_MS: u64 = 4 * mirror_protocol::HEARTBEAT_INTERVAL_MS;
+
+fn now_ms() -> u64 {
+    EPOCH.elapsed().as_millis() as u64
+}
+
+fn mark_host_alive() {
+    LAST_HOST_MSG_MS.store(now_ms(), AtomicOrdering::Relaxed);
+}
+
+/// True when the desktop has been silent for longer than [`HOST_TIMEOUT_MS`].
+pub fn host_silent() -> bool {
+    now_ms().saturating_sub(LAST_HOST_MSG_MS.load(AtomicOrdering::Relaxed)) > HOST_TIMEOUT_MS
+}
 
 pub static USB_ACTIVE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static USB_HANDLE: Lazy<Mutex<Option<i32>>> = Lazy::new(|| Mutex::new(None));
@@ -144,6 +167,8 @@ pub fn start_usb_loop(fd: i32) {
     }
 
     set_state(AoaState::Connected);
+    // The session counts as heard-from at start: the desktop just opened it.
+    mark_host_alive();
 
     // Shared queues: created here so both threads and the JNI bridge (via
     // GLOBAL_MUXER) reference the same session.
@@ -225,6 +250,7 @@ pub fn start_usb_loop(fd: i32) {
             let len =
                 unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if len > 0 {
+                mark_host_alive();
                 acc.extend_from_slice(&buf[..len as usize]);
                 // Extract every complete NUL-terminated message
                 while let Some(pos) = acc.iter().position(|&b| b == 0) {
@@ -232,6 +258,9 @@ pub fn start_usb_loop(fd: i32) {
                     if let Ok(text) = std::str::from_utf8(&msg[..msg.len() - 1]) {
                         let trimmed = text.trim();
                         if trimmed.is_empty() {
+                            continue;
+                        }
+                        if trimmed == mirror_protocol::HEARTBEAT {
                             continue;
                         }
                         if trimmed == mirror_protocol::KEYFRAME_REQUEST {
@@ -284,6 +313,12 @@ pub fn start_usb_loop(fd: i32) {
         loop {
             match queues.pop_next(Duration::from_millis(100)) {
                 PopResult::Packet(frame) => {
+                    // Nobody is reading: a write would block on a full
+                    // endpoint and the capture would run for nothing.
+                    if host_silent() {
+                        Muxer::release_buffer(frame);
+                        continue;
+                    }
                     let frame_len = frame.len();
                     let frame_type_video = frame_len > 9 && frame[4] == 0x01;
 

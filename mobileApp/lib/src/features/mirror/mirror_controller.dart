@@ -48,6 +48,9 @@ class MirrorController extends ChangeNotifier {
   Timer? _uptimeTimer;
   bool _disposed = false;
 
+  /// The link is up but the desktop app stopped sending heartbeats.
+  bool _hostSilent = false;
+
   MirrorPhase get phase => _phase;
   bool get isStreaming => _phase == MirrorPhase.streaming;
   bool get nativeReady => _nativeReady;
@@ -170,6 +173,26 @@ class MirrorController extends ChangeNotifier {
       _log(LogCode.connectionLost, detail: state);
       await _stopService();
       _onDetached();
+      return;
+    }
+
+    // Cable still in, but the desktop app is closed or hung: the accessory fd
+    // keeps accepting writes, so stop capturing rather than stream into it.
+    if (state == 'waiting' && !_hostSilent) {
+      _hostSilent = true;
+      _log(LogCode.hostSilent);
+      if (_phase == MirrorPhase.streaming || _statusOverride == 'awaitingApproval') {
+        await _stopService();
+        _stopStreamingTimers();
+        _metrics = MirrorMetrics.zero;
+      }
+      _statusOverride = 'hostSilent';
+      _setPhase(MirrorPhase.linked);
+    } else if (state != 'waiting' && _hostSilent) {
+      _hostSilent = false;
+      _log(LogCode.hostBack);
+      _statusOverride = null;
+      _notify();
     }
   }
 
@@ -178,6 +201,9 @@ class MirrorController extends ChangeNotifier {
     switch (command['command']) {
       case 'start':
         await _requestCapture(command);
+      case 'options':
+        // Live changes while capturing; also remembered for the next start.
+        await _channel.updateOptions(_streamOptions(command));
       case 'stop':
         _log(LogCode.stopRequested);
         await _stopService();
@@ -196,6 +222,7 @@ class MirrorController extends ChangeNotifier {
         'resolution': command['resolution'] ?? '1080p',
         'bitrate': command['bitrate'] ?? '8 Mbps',
         'fps': command['fps'] ?? '60',
+        ..._streamOptions(command),
       });
       await _channel.requestScreenCapture();
 
@@ -209,6 +236,13 @@ class MirrorController extends ChangeNotifier {
       _log(LogCode.captureRequestFailed, detail: '$error');
     }
   }
+
+  /// Values are passed through verbatim; `MirrorForegroundService.kt` parses
+  /// them, and the desktop's `QualityPanel.tsx` defines them.
+  Map<String, Object?> _streamOptions(Map<String, dynamic> command) => {
+        'orientation': command['orientation'] ?? 'Auto',
+        'audioSource': command['audioSource'] ?? 'Game System',
+      };
 
   void _onCaptureApproved() {
     _log(LogCode.captureApproved);
@@ -242,6 +276,7 @@ class MirrorController extends ChangeNotifier {
 
   void _onDetached() {
     _log(LogCode.usbDetached);
+    _hostSilent = false;
     _commandTimer?.cancel();
     _stopStreamingTimers();
     _metrics = MirrorMetrics.zero;

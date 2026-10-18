@@ -55,6 +55,17 @@ class MainActivity : FlutterActivity() {
                     pendingConfig = call.arguments as? Map<String, Any>
                     result.success(null)
                 }
+                "updateOptions" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val options = call.arguments as? Map<String, Any> ?: emptyMap()
+                    // Remembered for the next start, and applied now if capturing.
+                    pendingConfig = (pendingConfig ?: emptyMap()) + options
+                    com.mirror.stream_mobile_app.service.MirrorForegroundService.active?.applyOptions(
+                        options["orientation"] as? String,
+                        options["audioSource"] as? String,
+                    )
+                    result.success(null)
+                }
                 "stopService" -> {
                     val serviceIntent = Intent(this, com.mirror.stream_mobile_app.service.MirrorForegroundService::class.java)
                     stopService(serviceIntent)
@@ -213,6 +224,8 @@ class MainActivity : FlutterActivity() {
                 putExtra("resolution", res)
                 putExtra("bitrate", bit)
                 putExtra("fps", fps)
+                putExtra("orientation", pendingConfig?.get("orientation") as? String ?: "Auto")
+                putExtra("audioSource", pendingConfig?.get("audioSource") as? String ?: "Game System")
             }
             // ContextCompat picks startForegroundService on API 26+ and the
             // plain startService below that — a direct call would crash on

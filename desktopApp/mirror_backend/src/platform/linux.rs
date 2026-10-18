@@ -120,6 +120,12 @@ pub(super) fn install_driver() -> InstallOutcome {
 pub(super) fn obs_plugin_dir() -> Option<std::path::PathBuf> {
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
 
+    // The Snap remaps XDG_CONFIG_HOME into its own user-common directory.
+    let snap = home.join("snap/obs-studio/common/.config/obs-studio");
+    if snap.exists() {
+        return Some(snap.join("plugins"));
+    }
+
     // A Flatpak OBS cannot see ~/.config, so its config lives in the sandbox
     // directory. Checked first: a machine can have both, and the Flatpak one
     // is the one that would fail to find a plugin installed elsewhere.

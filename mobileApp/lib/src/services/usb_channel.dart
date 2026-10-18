@@ -61,6 +61,11 @@ class UsbChannel {
   Future<void> setConfig(Map<String, Object?> config) =>
       _channel.invokeMethod<void>('setConfig', config);
 
+  /// Applies orientation and audio-source changes to a running capture, and
+  /// keeps them for the next start.
+  Future<void> updateOptions(Map<String, Object?> options) =>
+      _channel.invokeMethod<void>('updateOptions', options);
+
   /// Opens the system screen-capture consent dialog.
   ///
   /// Returning does not mean capture started — only that the dialog was shown.

@@ -20,6 +20,7 @@
   "statusReadyForCapture": "Ready to capture",
   "statusNativeMissing": "Native library missing — streaming is unavailable",
   "statusPipelineFailed": "The USB connection could not be opened",
+  "statusHostSilent": "Cable connected, but the desktop app is not responding — open it on the computer",
 
   "metricThroughput": "Throughput",
   "metricLatency": "Latency",
@@ -71,5 +72,7 @@
   "eventConnectionLost": "Connection lost ({state})",
   "@eventConnectionLost": {
     "placeholders": { "state": { "type": "String" } }
-  }
+  },
+  "eventHostSilent": "The desktop app stopped responding — capture paused",
+  "eventHostBack": "The desktop app is responding again"
 }

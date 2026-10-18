@@ -36,7 +36,9 @@ enum LogCode {
   streaming(LogSeverity.success),
   stopRequested(LogSeverity.info),
   stopped(LogSeverity.info),
-  connectionLost(LogSeverity.error);
+  connectionLost(LogSeverity.error),
+  hostSilent(LogSeverity.warning),
+  hostBack(LogSeverity.success);
 
   const LogCode(this.severity);
 
@@ -96,5 +98,7 @@ String describeLogEntry(AppLocalizations l10n, LogEntry entry) {
     LogCode.stopRequested => l10n.eventStopRequested,
     LogCode.stopped => l10n.eventStopped,
     LogCode.connectionLost => l10n.eventConnectionLost(detail),
+    LogCode.hostSilent => l10n.eventHostSilent,
+    LogCode.hostBack => l10n.eventHostBack,
   };
 }

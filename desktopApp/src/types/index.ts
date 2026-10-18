@@ -123,4 +123,5 @@ export interface StreamConfig {
   bitrate: string;
   fps: string;
   audioSource: string;
+  orientation: string;
 }

@@ -8,13 +8,17 @@ use crate::log_event;
 use mirror_i18n::codes;
 use once_cell::sync::Lazy;
 use rusb::{Context as RusbContext, DeviceHandle, UsbContext};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub static DISCOVERED_DEVICES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static STREAMING_ACTIVE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-pub static PENDING_CONFIG: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+/// Messages for the phone, oldest first. A queue rather than one slot: a live
+/// option change sent right after "start" must not replace it.
+pub static PENDING_CONFIG: Lazy<Mutex<VecDeque<String>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
 pub static FORCE_DISCONNECT: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 /// Set when frames were lost and the decoder needs a keyframe to recover.
 static KEYFRAME_WANTED: AtomicBool = AtomicBool::new(false);
@@ -22,6 +26,8 @@ static KEYFRAME_WANTED: AtomicBool = AtomicBool::new(false);
 /// Minimum gap between keyframe requests. A burst of drops should cost one
 /// large keyframe, not a queue of them.
 const KEYFRAME_REQUEST_GAP: Duration = Duration::from_millis(250);
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(mirror_protocol::HEARTBEAT_INTERVAL_MS);
 
 /// Asks the phone for a keyframe. Cheap to call repeatedly; the receiver loop
 /// sends at most one request per [`KEYFRAME_REQUEST_GAP`].
@@ -167,6 +173,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
         let mut last_activity = Instant::now();
         let mut link_delay = crate::telemetry::metrics::LinkDelay::new();
         let mut last_keyframe_request = Instant::now() - KEYFRAME_REQUEST_GAP;
+        let mut last_heartbeat = Instant::now() - HEARTBEAT_INTERVAL;
         // Short timeout so pending config commands and shutdown signals are
         // observed quickly; at 120 fps data arrives every ~8 ms anyway, so
         // the timeout only fires when the link is idle.
@@ -190,7 +197,7 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
             // 2. Flush pending config commands (Critical for 'Start' button)
             let mut current_config = None;
             if let Ok(mut pending) = PENDING_CONFIG.lock() {
-                current_config = pending.take();
+                current_config = pending.pop_front();
             }
 
             if let Some(config_json) = current_config {
@@ -202,14 +209,20 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
                     Ok(n) => log_event!(codes::USB_STREAMING_CONFIG_SENT, "bytes" => n),
                     Err(e) => {
                         log_event!(codes::USB_STREAMING_CONFIG_FAILED, "error" => format!("{e:?}"));
-                        // Re-queue
+                        // Re-queue at the front so order is kept.
                         if let Ok(mut pending) = PENDING_CONFIG.lock() {
-                            if pending.is_none() {
-                                *pending = Some(config_json);
-                            }
+                            pending.push_front(config_json);
                         }
                     }
                 }
+            }
+
+            // 2a. Tell the phone someone is still reading.
+            if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                last_heartbeat = Instant::now();
+                let mut msg = mirror_protocol::HEARTBEAT.as_bytes().to_vec();
+                msg.push(0);
+                let _ = handle.write_bulk(endpoint_out, &msg, Duration::from_millis(200));
             }
 
             // 2b. Ask for a keyframe if the pipeline lost frames.
@@ -237,8 +250,10 @@ fn start_streaming_loop(device: rusb::Device<RusbContext>, my_gen: u64) {
                     for frame in frames {
                         match frame.packet_type {
                             mirror_protocol::PacketType::Video => {
-                                if let Some(us) = link_delay.observe(arrival_us, frame.pts_us) {
-                                    if let Ok(mut m) = crate::telemetry::metrics::METRICS.lock() {
+                                let delay = link_delay.observe(arrival_us, frame.pts_us);
+                                if let Ok(mut m) = crate::telemetry::metrics::METRICS.lock() {
+                                    m.record_video_packet();
+                                    if let Some(us) = delay {
                                         m.record_link_delay(us / 1000);
                                     }
                                 }

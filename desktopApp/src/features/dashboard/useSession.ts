@@ -9,8 +9,14 @@ const DEFAULT_CONFIG: StreamConfig = {
   resolution: BALANCED.resolution,
   bitrate: BALANCED.bitrate,
   fps: BALANCED.fps,
-  audioSource: 'Game + Mic',
+  // Device audio only: the mic is opt-in, since it also picks up the phone's
+  // speaker unless headphones are used.
+  audioSource: 'Game System',
+  orientation: 'Auto',
 };
+
+/** Settings the phone applies to a running capture, without a new consent prompt. */
+const LIVE_KEYS: readonly (keyof StreamConfig)[] = ['orientation', 'audioSource'];
 
 /** How long to wait for the phone's consent prompt before assuming it was dismissed. */
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -25,10 +31,21 @@ export function useSession(isConnected: boolean, fps: number) {
   const [startRequested, setStartRequested] = useState(false);
   const [busy, setBusy] = useState<'connect' | 'start' | null>(null);
 
+  const mirroring = fps > 0;
+
   const update = useCallback(
-    <K extends keyof StreamConfig>(key: K, value: StreamConfig[K]) =>
-      setConfig((prev) => ({ ...prev, [key]: value })),
-    [],
+    <K extends keyof StreamConfig>(key: K, value: StreamConfig[K]) => {
+      const next = { ...config, [key]: value };
+      setConfig(next);
+      if (mirroring && LIVE_KEYS.includes(key)) {
+        void call('syncConfig', {
+          command: 'options',
+          orientation: next.orientation,
+          audioSource: next.audioSource,
+        }).catch((error) => console.error('Applying the option failed', error));
+      }
+    },
+    [config, mirroring],
   );
 
   const applyPreset = useCallback(
