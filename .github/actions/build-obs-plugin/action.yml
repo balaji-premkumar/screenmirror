@@ -37,8 +37,10 @@ runs:
         set -euo pipefail
         obs="$RUNNER_TEMP/obs"
         mkdir -p "$obs/src" "$obs/cfg"
+        # Relative paths: Git Bash's tar reads "D:" in an absolute path as a host.
+        cd "$obs/src"
         curl -fsSL --retry 5 "https://github.com/obsproject/obs-studio/archive/refs/tags/$OBS_VERSION.tar.gz" \
-          | tar -xz -C "$obs/src" --strip-components=1 \
+          | tar -xz --strip-components=1 \
               "obs-studio-$OBS_VERSION/libobs" "obs-studio-$OBS_VERSION/deps/w32-pthreads"
         printf '#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n' > "$obs/cfg/obsconfig.h"
         echo "OBS_DIR=$obs" >> "$GITHUB_ENV"
