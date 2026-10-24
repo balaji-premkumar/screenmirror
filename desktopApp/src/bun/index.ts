@@ -13,42 +13,11 @@ import { rpc } from './rpc';
 
 const DEV_SERVER_URL = 'http://localhost:5173';
 
-/**
- * Delay before offering to install USB permissions.
- *
- * Both the Linux and Windows paths raise a system elevation prompt. Running
- * that at module load meant the prompt appeared before any UI had been drawn,
- * so the user was asked to authorise an elevated action by an application they
- * could not yet see — and startup blocked on their answer.
- */
-const DRIVER_PROMPT_DELAY_MS = 1500;
-
 /** The stream's native size. The real frame size comes from the phone. */
 const NOMINAL_WIDTH = 1920;
 const NOMINAL_HEIGHT = 1080;
 
 console.log(`Loading the native backend from ${libraryPath}`);
-
-/**
- * Installs USB permissions, but only when they are actually missing.
- *
- * Re-running it on every launch would raise an elevation prompt each time for
- * nothing.
- */
-function ensureUsbAccess() {
-  if (native.driverOk()) {
-    console.log('USB access is already configured.');
-    return;
-  }
-
-  if (process.platform === 'linux') {
-    console.log('Installing the udev rule for accessory access…');
-    console.log(`udev rule installation returned ${native.installLinuxPermissions()}`);
-  } else if (process.platform === 'win32') {
-    console.log('Installing the WinUSB driver for the accessory…');
-    console.log(`WinUSB installation returned ${native.installWindowsDriver()}`);
-  }
-}
 
 async function mainViewUrl(): Promise<string> {
   const channel = await Updater.localInfo.channel();
@@ -81,7 +50,9 @@ new BrowserWindow({
 native.init(NOMINAL_WIDTH, NOMINAL_HEIGHT);
 console.log('Backend initialised.');
 
-setTimeout(ensureUsbAccess, DRIVER_PROMPT_DELAY_MS);
+// USB access is installed from the loader screen (`startDriverInstall`), once
+// the window is up: it raises an elevation prompt, and doing that before any UI
+// was drawn asked the person to authorise an app they could not yet see.
 
 /**
  * Tears the native pipeline down so the USB interface is released and the

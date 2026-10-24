@@ -50,6 +50,9 @@ const lib = dlopen(libraryPath, {
   setup_linux_permissions: { args: [], returns: FFIType.i32 },
   install_windows_driver: { args: [], returns: FFIType.i32 },
   check_driver_status: { args: [], returns: FFIType.i32 },
+  check_adb_enabled: { args: [], returns: FFIType.i32 },
+  start_driver_install: { args: [], returns: FFIType.i32 },
+  get_driver_install_state: { args: [], returns: FFIType.i32 },
 
   // Connection control
   trigger_manual_handshake: { args: [FFIType.u16, FFIType.u16], returns: FFIType.i32 },
@@ -126,8 +129,12 @@ export const native = {
   shutdown: () => lib.symbols.stop_mirror(),
 
   driverOk: () => lib.symbols.check_driver_status() === 1,
+  adbEnabled: () => lib.symbols.check_adb_enabled() === 1,
   installLinuxPermissions: () => lib.symbols.setup_linux_permissions(),
   installWindowsDriver: () => lib.symbols.install_windows_driver(),
+  /** Starts the install in the background; `false` if one is already running. */
+  startDriverInstall: () => lib.symbols.start_driver_install() === 1,
+  driverInstallState: () => lib.symbols.get_driver_install_state(),
 
   handshake: (vid: number, pid: number) => lib.symbols.trigger_manual_handshake(vid, pid),
   syncConfig: (config: unknown) => lib.symbols.sync_config(cstring(JSON.stringify(config))),

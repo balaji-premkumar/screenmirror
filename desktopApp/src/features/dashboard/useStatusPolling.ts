@@ -51,6 +51,7 @@ export interface DashboardStatus {
   driverOk: boolean;
   obsRunning: boolean;
   playerState: PlayerState;
+  adbEnabled: boolean;
 }
 
 /** Below these deltas a metrics change is not worth a re-render. */
@@ -86,6 +87,7 @@ const EMPTY_UPDATE: StatusUpdate = {
   driverOk: false,
   obsRunning: false,
   playerState: PlayerState.Stopped,
+  adbEnabled: false,
 };
 
 export function useStatusPolling(initialDriverOk: boolean): DashboardStatus {
@@ -99,6 +101,7 @@ export function useStatusPolling(initialDriverOk: boolean): DashboardStatus {
     driverOk: initialDriverOk,
     obsRunning: false,
     playerState: PlayerState.Stopped,
+    adbEnabled: false,
   });
 
   const missedPolls = useRef(0);
@@ -133,6 +136,7 @@ export function useStatusPolling(initialDriverOk: boolean): DashboardStatus {
           prev.driverOk !== data.driverOk ||
           prev.obsRunning !== data.obsRunning ||
           prev.playerState !== data.playerState ||
+          prev.adbEnabled !== data.adbEnabled ||
           prev.bufferSize !== data.bufferSize ||
           devicesChanged(prev.devices, nextDevices) ||
           metricsChanged(prev.metrics, nextMetrics);
@@ -150,6 +154,7 @@ export function useStatusPolling(initialDriverOk: boolean): DashboardStatus {
           driverOk: data.driverOk,
           obsRunning: data.obsRunning,
           playerState: data.playerState,
+          adbEnabled: data.adbEnabled,
           logs: hasNewLogs
             ? [...prev.logs, ...data.newLogs].slice(-MAX_LOG_LINES)
             : // Clear the log on disconnect so the next session starts fresh.

@@ -398,18 +398,21 @@ pub fn get_obs_plugin_dir() -> Option<String> {
 /// 3.0.0 — audio SHM header grew from 8 to 32 bytes and swapped the bare
 /// write index for a monotonic sample count, so a 2.x plugin binary would
 /// misread the ring entirely. The version file forces it to be replaced.
-const PLUGIN_VERSION: &str = "3.0.0";
+///
+/// 3.0.1: the Windows build read the read-only rings with interlocked
+/// compare-exchange, which faults on a read-only page and crashed OBS.
+const PLUGIN_VERSION: &str = "3.0.1";
 
 const PLUGIN_BINARY: &str = crate::platform::obs_plugin_filename();
 
 /// Check whether our OBS plugin is already installed and up to date.
 pub fn check_plugin_installed() -> bool {
     if let Some(plugin_dir) = get_obs_plugin_dir() {
-        let base_path = format!("{}/mirror-source", plugin_dir);
-        let bin_path = format!("{}/bin/64bit/{}", base_path, PLUGIN_BINARY);
-        let version_path = format!("{}/version.txt", base_path);
+        let plugin_dir = std::path::Path::new(&plugin_dir);
+        let bin_path = crate::platform::obs_plugin_binary(plugin_dir);
+        let version_path = crate::platform::obs_plugin_root(plugin_dir).join("version.txt");
 
-        if !std::path::Path::new(&bin_path).exists() {
+        if !bin_path.exists() {
             return false;
         }
 
@@ -425,7 +428,8 @@ pub fn check_plugin_installed() -> bool {
     }
 }
 
-/// Build (Linux) or copy (Windows) and install the OBS plugin.
+/// Copy a built plugin (compiling it first on Linux if none is bundled) into
+/// the OBS plugin directory.
 /// Returns 0 on success, -1 on failure.
 pub fn install_plugin(project_root: &str) -> i32 {
     log_event!(codes::OBS_INSTALL_STARTED, "version" => PLUGIN_VERSION);
@@ -445,14 +449,12 @@ pub fn install_plugin(project_root: &str) -> i32 {
     // 1. Look for a pre-bundled plugin binary
     let bundled = format!("{}/bin/{}", project_root, PLUGIN_BINARY);
     let precompiled_dev = format!("{}/{}", build_dir, PLUGIN_BINARY);
+    // Multi-config generators (MSVC) add a per-configuration subdirectory.
+    let precompiled_release = format!("{}/Release/{}", build_dir, PLUGIN_BINARY);
 
-    let mut plugin_src = if std::path::Path::new(&bundled).exists() {
-        Some(bundled)
-    } else if std::path::Path::new(&precompiled_dev).exists() {
-        Some(precompiled_dev.clone())
-    } else {
-        None
-    };
+    let mut plugin_src = [bundled, precompiled_dev.clone(), precompiled_release]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists());
 
     // 2. Linux only: compile locally when no binary is bundled
     #[cfg(target_os = "linux")]
@@ -489,29 +491,29 @@ pub fn install_plugin(project_root: &str) -> i32 {
         }
     };
 
-    // Install to the OBS plugin directory
-    let base_install_dir = format!("{}/mirror-source", plugin_dir);
-    let bin_install_dir = format!("{}/bin/64bit", base_install_dir);
+    // Install to the OBS plugin directory, in the layout this OS's OBS reads.
+    let plugin_dir = std::path::Path::new(&plugin_dir);
+    let base_install_dir = crate::platform::obs_plugin_root(plugin_dir);
+    let dst = crate::platform::obs_plugin_binary(plugin_dir);
 
-    if std::fs::create_dir_all(&bin_install_dir).is_err() {
+    if dst.parent().map_or(true, |d| std::fs::create_dir_all(d).is_err()) {
         log_event!(codes::OBS_INSTALL_MKDIR_FAILED);
         return -1;
     }
 
-    let dst = format!("{}/{}", bin_install_dir, PLUGIN_BINARY);
-    log_event!(codes::OBS_INSTALL_COPYING, "from" => &final_src, "to" => &dst);
+    log_event!(codes::OBS_INSTALL_COPYING, "from" => &final_src, "to" => dst.display());
     if let Err(e) = std::fs::copy(&final_src, &dst) {
         log_event!(codes::OBS_INSTALL_COPY_FAILED, "error" => e);
         return -1;
     }
 
     // Write version file
-    let version_path = format!("{}/version.txt", base_install_dir);
+    let version_path = base_install_dir.join("version.txt");
     if let Err(e) = std::fs::write(&version_path, PLUGIN_VERSION) {
-        log_event!(codes::OBS_INSTALL_VERSION_WRITE_FAILED, "path" => &version_path, "error" => e);
+        log_event!(codes::OBS_INSTALL_VERSION_WRITE_FAILED, "path" => version_path.display(), "error" => e);
     }
 
-    log_event!(codes::OBS_INSTALL_COMPLETE, "version" => PLUGIN_VERSION, "path" => &dst);
+    log_event!(codes::OBS_INSTALL_COMPLETE, "version" => PLUGIN_VERSION, "path" => dst.display());
 
     0
 }

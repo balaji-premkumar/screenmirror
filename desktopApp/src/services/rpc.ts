@@ -14,7 +14,7 @@
  * `src/bun/rpc.ts` is what makes it callable; anything else is a type error.
  */
 
-import type { StartupChecks, StatusUpdate, StreamConfig } from '@/types';
+import type { DriverInstallState, StartupChecks, StatusUpdate, StreamConfig } from '@/types';
 
 /** `{ success }` is what every mutating handler in `src/bun/rpc.ts` returns. */
 export interface Ack {
@@ -30,7 +30,8 @@ export interface Ack {
 export interface RpcMethods {
   getStatusUpdate: () => StatusUpdate;
   getStartupChecks: () => StartupChecks;
-  repairDrivers: () => number;
+  startDriverInstall: () => Ack;
+  getDriverInstallState: () => DriverInstallState;
   installObsPlugin: () => Ack;
   triggerHandshake: (params: { vid: number; pid: number }) => number;
   toggleAutoReconnect: (params: { enabled: boolean }) => Ack;

@@ -1,18 +1,24 @@
 # Builds the Mirror Stream (USB) OBS source plugin on Linux, Windows and macOS.
 #
-# Linux:
-#   cmake -B build && cmake --build build
-#   (needs libobs-dev; falls back to -I/usr/include/obs)
+#   cmake -S obs_plugin -B obs_plugin/build
+#   cmake --build obs_plugin/build --config Release
 #
-# Windows (x64, from a VS developer prompt):
-#   cmake -B build -DCMAKE_PREFIX_PATH=C:/path/to/obs-studio-deps ^
-#         -DLIBOBS_INCLUDE_DIR=C:/path/to/obs-studio/libobs ^
-#         -DLIBOBS_LIB=C:/path/to/obs-studio/build/libobs/RelWithDebInfo/obs.lib
-#   cmake --build build --config Release
-#   Copy build/Release/mirror-source.dll into desktopApp/bin/ so the app's
-#   "Install OBS plugin" button can deploy it.
+# libobs is found per platform:
+#   Linux:   libobs-dev (falls back to -I/usr/include/obs).
+#   Windows: the installed OBS Studio. Headers matching its version are
+#            downloaded and import libraries are generated from its DLLs.
+#            Needs MSVC.
+#   macOS:   the installed OBS.app. Headers matching its version are
+#            downloaded and its libobs.framework is linked.
+# The Windows and macOS logic is in cmake/LibobsFromInstall.cmake.
+#
+# Overrides, on any platform:
+#   -DLIBOBS_INCLUDE_DIR=<obs-studio>/libobs -DLIBOBS_LIB=<path to libobs>
+#
+# `bun run build:bundle` copies the result into desktopApp/bin/, where the
+# app's "Install OBS plugin" button deploys it from.
 
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(mirror-source C)
 
 set(CMAKE_C_STANDARD 11)
@@ -32,18 +38,23 @@ find_package(libobs QUIET)
 
 if(TARGET OBS::libobs)
     target_link_libraries(mirror-source PRIVATE OBS::libobs)
-elseif(DEFINED LIBOBS_INCLUDE_DIR AND DEFINED LIBOBS_LIB)
+else()
+    if(NOT (DEFINED LIBOBS_INCLUDE_DIR AND DEFINED LIBOBS_LIB))
+        if(WIN32 OR APPLE)
+            include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LibobsFromInstall.cmake)
+        else()
+            # Distro default (Debian/Ubuntu: libobs-dev)
+            set(LIBOBS_INCLUDE_DIR /usr/include/obs)
+            set(LIBOBS_LIB obs)
+        endif()
+    endif()
     target_include_directories(mirror-source PRIVATE ${LIBOBS_INCLUDE_DIR})
     target_link_libraries(mirror-source PRIVATE ${LIBOBS_LIB})
-else()
-    # Distro default (Debian/Ubuntu: libobs-dev)
-    target_include_directories(mirror-source PRIVATE /usr/include/obs)
-    target_link_libraries(mirror-source PRIVATE obs)
 endif()
 
-if(WIN32)
-    # OpenFileMapping/MapViewOfFile live in kernel32 (linked by default);
-    # w32-pthreads comes in through libobs.
-else()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # shm_open lives in librt on older glibc.
     target_link_libraries(mirror-source PRIVATE rt pthread)
 endif()
+# Windows: OpenFileMapping/MapViewOfFile are in kernel32, linked by default.
+# macOS: shm_open and pthreads are in libSystem, linked by default.

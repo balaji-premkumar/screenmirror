@@ -22,6 +22,7 @@ const STARTUP: StartupChecks = {
   obsInstalled: true,
   obsPluginInstalled: true,
   obsPluginDir: '~/.config/obs-studio/plugins',
+  adbEnabled: false,
 };
 
 const PHONE_BEFORE = 'Phone|Pixel 8|18d1:4ee1';
@@ -93,6 +94,7 @@ export function installMockBridge(initial: Scene = 'none') {
         driverOk,
         obsRunning: true,
         playerState: player,
+        adbEnabled: false,
       };
     },
     triggerHandshake: () => {
@@ -121,7 +123,8 @@ export function installMockBridge(initial: Scene = 'none') {
     startPlayer: () => ((player = 2 as PlayerState), { success: true }),
     stopPlayer: () => ((player = 0 as PlayerState), { success: true }),
     toggleObsFeed: () => ({ success: true }),
-    repairDrivers: () => ((driverOk = true), 0),
+    startDriverInstall: () => ((driverOk = true), { success: true }),
+    getDriverInstallState: () => 2,
     installObsPlugin: () => ({ success: true }),
   };
 

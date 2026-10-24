@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useT } from '@/i18n';
-import { call } from '@/services/rpc';
+import { installUsbAccess } from '@/services/driver';
 
 /**
  * Shown only when USB access is missing, because that is the one problem the
@@ -17,7 +17,7 @@ export function SetupBanner() {
     if (isRepairing) return;
     setIsRepairing(true);
     try {
-      await call('repairDrivers');
+      await installUsbAccess();
     } catch (error) {
       console.error('Repairing USB permissions failed', error);
     } finally {
