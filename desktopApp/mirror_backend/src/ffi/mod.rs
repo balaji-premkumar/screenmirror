@@ -347,3 +347,25 @@ pub extern "C" fn setup_linux_permissions() -> i32 {
         0
     }
 }
+
+/// Starts the platform's USB access install on a background thread and
+/// returns at once: 1 when started, 0 when one is already running.
+///
+/// The blocking symbols above froze Bun's event loop for as long as the
+/// elevation prompt and the install took. Poll [`get_driver_install_state`].
+#[no_mangle]
+pub extern "C" fn start_driver_install() -> i32 {
+    i32::from(platform::start_install_driver())
+}
+
+/// 1 when a plugged-in phone has USB debugging (ADB) switched on, else 0.
+#[no_mangle]
+pub extern "C" fn check_adb_enabled() -> i32 {
+    i32::from(platform::adb_enabled())
+}
+
+/// 0 idle, 1 running, 2 installed, 3 nothing was needed, -1 failed.
+#[no_mangle]
+pub extern "C" fn get_driver_install_state() -> i32 {
+    platform::install_state()
+}

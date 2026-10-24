@@ -142,7 +142,7 @@ bun run dev          # starts the app in dev mode
 ```
 
 `build:all` needs `libobs-dev` for the OBS plugin step. Without it, use
-`bun run build:rust && bun run build:bundle && bun run build:vite` — the
+`bun run build:app` (which is also what `bun start` runs) — the
 desktop app runs fine without the plugin, and the *Send to OBS* control simply
 stays unavailable.
 

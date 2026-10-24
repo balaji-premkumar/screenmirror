@@ -15,6 +15,9 @@
 import { defineElectrobunRPC } from 'electrobun/bun';
 import type { Ack, RpcMethods } from '@/services/rpc';
 import type { LogEntry, Metrics, StartupChecks, StatusUpdate } from '@/types';
+// A value import, so relative: Electrobun's bundler does not read the `@/`
+// alias from tsconfig. The type-only imports above are erased before bundling.
+import { DriverInstallState } from '../types';
 import { native } from './native';
 
 const ZERO_METRICS: Metrics = {
@@ -47,6 +50,7 @@ const requests: {
     // Cached for a few seconds inside the backend, so polling it is cheap.
     obsRunning: native.obsRunning(),
     playerState: native.playerState() as StatusUpdate['playerState'],
+    adbEnabled: native.adbEnabled(),
   }),
 
   getStartupChecks: (): StartupChecks => ({
@@ -55,14 +59,22 @@ const requests: {
     obsInstalled: native.obsInstalled(),
     obsPluginInstalled: native.obsPluginInstalled(),
     obsPluginDir: native.obsPluginDir(),
+    adbEnabled: native.adbEnabled(),
   }),
 
-  repairDrivers: (): number => {
-    if (process.platform === 'linux') return native.installLinuxPermissions();
-    if (process.platform === 'win32') return native.installWindowsDriver();
-    // macOS needs no driver: IOKit lets a user-space process claim an
-    // interface no kernel driver has taken, and none claims an accessory.
-    return 0;
+  // The install runs on a backend thread: it waits on an elevation prompt and
+  // then on the system's driver installer, and doing that inside a handler
+  // froze the event loop, so the interface could not show any progress.
+  // macOS needs nothing: IOKit lets a user-space process claim an interface
+  // no kernel driver has taken, and none claims an accessory.
+  startDriverInstall: (): Ack => ({ success: native.startDriverInstall() }),
+
+  getDriverInstallState: (): DriverInstallState => {
+    const state = native.driverInstallState() as DriverInstallState;
+    if (state !== DriverInstallState.Running) {
+      console.log(`USB driver install state: ${state}`);
+    }
+    return state;
   },
 
   installObsPlugin: (): Ack => ({ success: native.installObsPlugin() === 0 }),
