@@ -496,6 +496,11 @@ pub fn install_plugin(project_root: &str) -> i32 {
     let base_install_dir = crate::platform::obs_plugin_root(plugin_dir);
     let dst = crate::platform::obs_plugin_binary(plugin_dir);
 
+    // Earlier versions installed the Linux layout here too. Intel OBS still
+    // loads that path, so it would load the module twice.
+    #[cfg(target_os = "macos")]
+    let _ = std::fs::remove_dir_all(plugin_dir.join("mirror-source"));
+
     if dst.parent().map_or(true, |d| std::fs::create_dir_all(d).is_err()) {
         log_event!(codes::OBS_INSTALL_MKDIR_FAILED);
         return -1;
@@ -506,6 +511,14 @@ pub fn install_plugin(project_root: &str) -> i32 {
         log_event!(codes::OBS_INSTALL_COPY_FAILED, "error" => e);
         return -1;
     }
+
+    // The copy keeps the download's quarantine flag, and Gatekeeper then
+    // refuses to let OBS load an unsigned module.
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(&dst)
+        .status();
 
     // Write version file
     let version_path = base_install_dir.join("version.txt");

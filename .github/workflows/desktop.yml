@@ -1,10 +1,12 @@
 name: Build Desktop App
 
 on:
-  # Every push builds installable packages, so a branch can be tried on all
-  # three systems without cutting a release. Nothing is published: the files
-  # are workflow artifacts, kept for 14 days.
+  # Pull requests and master only check that everything compiles on all three
+  # systems. Installable packages are made by the Release workflow, or by
+  # running this one by hand.
+  pull_request:
   push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       channel:
@@ -12,11 +14,18 @@ on:
         type: choice
         options: [canary, stable]
         default: canary
+      package:
+        description: Make installable packages (workflow artifacts, kept 14 days)
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       channel:
         type: string
         default: stable
+      package:
+        type: boolean
+        default: false
 
 # The event is in the group so a push to the branch a release runs from cannot
 # cancel the release's build (a called workflow is grouped as its own run).
@@ -57,7 +66,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev pkg-config \
-            libwebkit2gtk-4.1-dev cmake libobs-dev libsimde-dev
+            libwebkit2gtk-4.1-dev cmake
 
       - uses: ./.github/actions/setup-ffmpeg
         if: runner.os != 'macOS'
@@ -76,7 +85,7 @@ jobs:
       # here must not fail the app build: the app then runs, and the installer
       # step in it explains what is missing.
       - name: Fetch libwdi (Windows)
-        if: runner.os == 'Windows'
+        if: inputs.package && runner.os == 'Windows'
         continue-on-error: true
         shell: cmd
         run: |
@@ -85,7 +94,7 @@ jobs:
           msiexec /a libwdi-src\wdk-redist.msi /qn TARGETDIR=%CD%\libwdi-src\wdk
 
       - name: MinGW toolchain (Windows)
-        if: runner.os == 'Windows'
+        if: inputs.package && runner.os == 'Windows'
         continue-on-error: true
         uses: msys2/setup-msys2@v2
         with:
@@ -98,7 +107,7 @@ jobs:
             git
 
       - name: Build wdi-simple (Windows)
-        if: runner.os == 'Windows'
+        if: inputs.package && runner.os == 'Windows'
         continue-on-error: true
         shell: msys2 {0}
         working-directory: libwdi-src
@@ -126,18 +135,34 @@ jobs:
           PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/usr/local/opt/ffmpeg@8/lib/pkgconfig:/opt/homebrew/opt/ffmpeg@8/lib/pkgconfig' || '' }}
 
       # The OBS source plugin is bundled so "Install plugin" works from the
-      # package. Linux only: Windows and macOS need the OBS SDK, which CI does
-      # not fetch yet, and the bundler treats the plugin as optional.
-      - name: Build the OBS plugin (Linux)
-        if: runner.os == 'Linux'
+      # package.
+      - name: Build the OBS plugin
+        id: plugin
+        uses: ./.github/actions/build-obs-plugin
+
+      # Also published on its own, for people who install it by hand. Named
+      # per platform: the Linux and macOS files are both mirror-source.so.
+      - name: Name the OBS plugin
+        if: inputs.package
+        shell: bash
         run: |
-          cmake -S desktopApp/obs_plugin -B desktopApp/obs_plugin/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build desktopApp/obs_plugin/build --config Release
+          src="${{ steps.plugin.outputs.path }}"
+          mkdir -p plugin-dist
+          cp "$src" "plugin-dist/mirror-source-${{ matrix.label }}.${src##*.}"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.package
+        with:
+          name: obs-plugin-${{ matrix.label }}
+          path: plugin-dist/*
+          if-no-files-found: error
+          retention-days: 14
 
       # Cross-platform since it became a Bun script. The shell version it
       # replaced could not run here at all on Windows, so that job built the
       # DLL and then bundled nothing.
       - name: Bundle native libraries
+        if: inputs.package
         working-directory: desktopApp
         run: bun run build:bundle
 
@@ -145,16 +170,19 @@ jobs:
       # desktopApp/artifacts/. The channel only changes the file names and the
       # update metadata; nothing is signed until certificates are configured.
       - name: Package the app
+        if: inputs.package
         working-directory: desktopApp
         run: |
           bun run build:vite
           bunx electrobun build --env=${{ env.CHANNEL }}
 
       - name: List the package files
+        if: inputs.package
         shell: bash
         run: ls -lh desktopApp/artifacts
 
       - uses: actions/upload-artifact@v4
+        if: inputs.package
         id: upload
         with:
           name: ScreenMirror-${{ matrix.label }}
@@ -163,6 +191,7 @@ jobs:
           retention-days: 14
 
       - name: Link in the run summary
+        if: inputs.package
         shell: bash
         run: |
           echo "### ScreenMirror ${{ matrix.label }}" >> "$GITHUB_STEP_SUMMARY"

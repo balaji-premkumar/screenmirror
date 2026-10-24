@@ -1,12 +1,24 @@
 name: Build Mobile App
 
 on:
-  # Every push builds an APK to try. Without a release key it is signed with
-  # the debug key and named as such, so it cannot be mistaken for a release.
+  # Pull requests and master only check that the APK builds. A signed APK is
+  # made by the Release workflow, or by running this one by hand. Without a
+  # release key it is signed with the debug key and named as such, so it
+  # cannot be mistaken for a release.
+  pull_request:
   push:
+    branches: [master]
   workflow_dispatch:
+    inputs:
+      package:
+        description: Sign the APK and keep it (workflow artifact, kept 14 days)
+        type: boolean
+        default: true
   workflow_call:
     inputs:
+      package:
+        type: boolean
+        default: false
       require_release_signing:
         description: Fail instead of producing a debug-signed APK
         type: boolean
@@ -57,7 +69,7 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        if: env.KEYSTORE_BASE64 != ''
+        if: inputs.package && env.KEYSTORE_BASE64 != ''
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
           printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
@@ -77,6 +89,7 @@ jobs:
       # It is fine for trying a branch and never fine for a release: releases
       # set require_release_signing, which turns this into a failure.
       - name: Check how the APK is signed
+        if: inputs.package
         id: signing
         working-directory: mobileApp
         run: |
@@ -100,11 +113,13 @@ jobs:
           fi
 
       - name: Name the APK
+        if: inputs.package
         run: |
           mkdir -p dist
           cp mobileApp/build/app/outputs/flutter-apk/app-release.apk "dist/${{ steps.signing.outputs.name }}.apk"
 
       - uses: actions/upload-artifact@v4
+        if: inputs.package
         id: upload
         with:
           name: ${{ steps.signing.outputs.name }}
@@ -113,6 +128,7 @@ jobs:
           retention-days: 14
 
       - name: Link in the run summary
+        if: inputs.package
         run: |
           echo "### ${{ steps.signing.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
           echo "[Download the APK](${{ steps.upload.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
