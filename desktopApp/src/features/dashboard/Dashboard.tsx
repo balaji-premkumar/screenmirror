@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AdbNotice } from '@/components/AdbNotice';
 import LogoIcon from '@/components/ui/LogoIcon';
 import { tryCall } from '@/services/rpc';
 import { useT } from '@/i18n';
@@ -61,6 +62,7 @@ export function Dashboard({ startupChecks: initialChecks }: DashboardProps) {
       </header>
 
       {!status.driverOk && <SetupBanner />}
+      {status.adbEnabled && <AdbNotice />}
 
       <LinkStage
         stage={stage}

@@ -108,9 +108,29 @@ _Static_assert(sizeof(struct audio_shm_header) == 32, "audio_shm_header must be 
 
 /* ── Portable atomics (x86/ARM acquire loads + full fence) ─────────────── */
 #if defined(_MSC_VER)
-#  define LOAD_ACQ_U32(p)  ((uint32_t)InterlockedCompareExchange((volatile LONG *)(p), 0, 0))
-#  define LOAD_ACQ_I32(p)  ((int32_t)InterlockedCompareExchange((volatile LONG *)(p), 0, 0))
-#  define LOAD_ACQ_U64(p)  ((uint64_t)InterlockedCompareExchange64((volatile LONG64 *)(p), 0, 0))
+/*
+ * A plain volatile read followed by a fence. These used to be
+ * InterlockedCompareExchange(p, 0, 0), the usual MSVC idiom for an atomic
+ * load, but cmpxchg is a read-modify-write that the CPU always treats as a
+ * write. The rings are mapped FILE_MAP_READ, so the first load faulted and
+ * took OBS down with an access violation. Aligned loads of these sizes are
+ * single-copy atomic on x64 and ARM64; the fence supplies the ordering.
+ */
+static __forceinline uint32_t load_acq_u32(const volatile void *p)
+{
+    uint32_t v = *(const volatile uint32_t *)p;
+    MemoryBarrier();
+    return v;
+}
+static __forceinline uint64_t load_acq_u64(const volatile void *p)
+{
+    uint64_t v = *(const volatile uint64_t *)p;
+    MemoryBarrier();
+    return v;
+}
+#  define LOAD_ACQ_U32(p)  load_acq_u32(p)
+#  define LOAD_ACQ_I32(p)  ((int32_t)load_acq_u32(p))
+#  define LOAD_ACQ_U64(p)  load_acq_u64(p)
 #  define FULL_FENCE()     MemoryBarrier()
 #else
 #  define LOAD_ACQ_U32(p)  __atomic_load_n((p), __ATOMIC_ACQUIRE)

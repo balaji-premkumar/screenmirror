@@ -61,6 +61,17 @@ export const PlayerState = {
 
 export type PlayerState = (typeof PlayerState)[keyof typeof PlayerState];
 
+/** Where a USB access install has got to. Mirrors `platform::INSTALL_*`. */
+export const DriverInstallState = {
+  Idle: 0,
+  Running: 1,
+  Installed: 2,
+  NotNeeded: 3,
+  Failed: -1,
+} as const;
+
+export type DriverInstallState = (typeof DriverInstallState)[keyof typeof DriverInstallState];
+
 /** One poll of the backend's current state. */
 export interface StatusUpdate {
   bufferSize: number;
@@ -74,6 +85,8 @@ export interface StatusUpdate {
   /** Whether an OBS Studio process is running right now. */
   obsRunning: boolean;
   playerState: PlayerState;
+  /** A plugged-in phone has USB debugging on, which the app does not need. */
+  adbEnabled: boolean;
 }
 
 /** A USB device the backend has discovered. */
@@ -105,6 +118,7 @@ export interface StartupChecks {
   obsInstalled: boolean;
   obsPluginInstalled: boolean;
   obsPluginDir: string;
+  adbEnabled: boolean;
 }
 
 export type CheckStatus = 'pending' | 'checking' | 'ok' | 'warn' | 'error';

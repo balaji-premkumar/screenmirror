@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { AdbNotice } from '@/components/AdbNotice';
 import LogoIcon from '@/components/ui/LogoIcon';
 import { useT } from '@/i18n';
+import { installUsbAccess } from '@/services/driver';
 import { call, isReady } from '@/services/rpc';
-import type { CheckItem, CheckStatus, StartupChecks } from '@/types';
+import { DriverInstallState, type CheckItem, type CheckStatus, type StartupChecks } from '@/types';
 
 interface LoaderScreenProps {
   onComplete: (checks: StartupChecks) => void;
@@ -27,6 +29,7 @@ const FAILED_CHECKS: StartupChecks = {
   obsInstalled: false,
   obsPluginInstalled: false,
   obsPluginDir: '',
+  adbEnabled: false,
 };
 
 /** Paced so each result is legible rather than flashing past. */
@@ -83,10 +86,49 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
   const [checks, setChecks] = useState<CheckItem[]>(INITIAL_CHECKS);
   const [startupData, setStartupData] = useState<StartupChecks | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [installingDriver, setInstallingDriver] = useState(false);
   const [progress, setProgress] = useState(0);
 
   const update = (index: number, status: CheckStatus, detail: string) =>
     setChecks((prev) => prev.map((c, i) => (i === index ? { ...c, status, detail } : c)));
+
+  /**
+   * Installs USB access and reports it on the driver row. Resolves with
+   * whether access is now in place.
+   *
+   * The install raises an elevation prompt and then waits on the system's
+   * driver installer, so the row shows a spinner for as long as that takes.
+   */
+  const installDriver = async (): Promise<boolean> => {
+    setInstallingDriver(true);
+    update(DRIVER, 'checking', t('loader.check.driver.installing'));
+    try {
+      const state = await installUsbAccess();
+      if (state === DriverInstallState.Installed) {
+        update(DRIVER, 'ok', t('loader.check.driver.installed'));
+        return true;
+      }
+      if (state === DriverInstallState.NotNeeded) {
+        // Every package is in place but a phone still would not open: it was
+        // plugged in before its driver existed.
+        update(DRIVER, 'warn', t('loader.check.driver.replug'));
+        return true;
+      }
+      update(DRIVER, 'error', t('loader.check.driver.failed'));
+      return false;
+    } catch (error) {
+      console.error('Installing USB access failed', error);
+      update(DRIVER, 'error', t('loader.check.driver.failed'));
+      return false;
+    } finally {
+      setInstallingDriver(false);
+    }
+  };
+
+  const retryDriver = async () => {
+    const ok = await installDriver();
+    setStartupData((prev) => (prev ? { ...prev, driverOk: ok } : prev));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -107,11 +149,15 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
         if (cancelled) return;
 
         setProgress(25);
-        update(
-          DRIVER,
-          data.driverOk ? 'ok' : 'warn',
-          data.driverOk ? t('loader.check.driver.ok') : t('loader.check.driver.warn'),
-        );
+        // The install runs alongside the remaining checks; the screen waits
+        // for it before offering the dashboard.
+        let driverDone: Promise<boolean>;
+        if (data.driverOk) {
+          update(DRIVER, 'ok', t('loader.check.driver.ok'));
+          driverDone = Promise.resolve(true);
+        } else {
+          driverDone = installDriver();
+        }
 
         await delay(STEP_DELAY_MS);
         if (cancelled) return;
@@ -146,7 +192,9 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
           );
         }
 
-        setStartupData(data);
+        const driverOk = await driverDone;
+        if (cancelled) return;
+        setStartupData({ ...data, driverOk });
       } catch (error) {
         console.error('Startup checks failed', error);
         if (cancelled) return;
@@ -190,7 +238,8 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
     }
   };
 
-  const done = startupData !== null;
+  const done = startupData !== null && !installingDriver;
+  const canRetryDriver = startupData !== null && checks[DRIVER].status === 'error';
   const canInstallPlugin =
     checks[PLUGIN].status === 'warn' &&
     startupData?.obsInstalled === true &&
@@ -198,7 +247,8 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
 
   // Everything is fine: there is nothing to read, so do not make the person
   // click through. Any warning keeps the screen up until they have seen it.
-  const allClear = done && checks.every((c) => c.status === 'ok');
+  const allClear =
+    done && !startupData?.adbEnabled && checks.every((c) => c.status === 'ok');
   useEffect(() => {
     if (!allClear || !startupData) return;
     const timer = setTimeout(() => onComplete(startupData), 900);
@@ -240,6 +290,17 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
                 )}
               </div>
 
+              {i === DRIVER && canRetryDriver && (
+                <button
+                  type="button"
+                  onClick={retryDriver}
+                  disabled={installingDriver}
+                  className="shrink-0 rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition-colors hover:border-ink/40 disabled:opacity-60"
+                >
+                  {t('loader.retry')}
+                </button>
+              )}
+
               {i === PLUGIN && canInstallPlugin && (
                 <button
                   type="button"
@@ -253,6 +314,12 @@ export function LoaderScreen({ onComplete }: LoaderScreenProps) {
             </li>
           ))}
         </ul>
+
+        {startupData?.adbEnabled && (
+          <div className="mb-6">
+            <AdbNotice />
+          </div>
+        )}
 
         {!allClear && (
           <div className="flex justify-center">

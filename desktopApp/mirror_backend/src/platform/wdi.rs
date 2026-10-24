@@ -13,8 +13,8 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
-/// The provider name written into every package we install. `pnputil
-/// /enum-drivers` lists it, which is how an installed package is recognised.
+/// The manufacturer name written into every package we install. libwdi still
+/// lists itself as the provider, so packages are recognised by [`inf_name`].
 pub const PROVIDER: &str = "ScreenMirror";
 
 /// One device to bind WinUSB to.
@@ -31,6 +31,18 @@ pub struct Target {
 pub const ACCESSORY_NAME: &str = "Android Accessory (ScreenMirror)";
 pub const PHONE_NAME: &str = "Android Phone (ScreenMirror)";
 
+/// The INF name a package for `t` is installed under, e.g.
+/// `mirror_04e8_6860_mi03.inf`.
+///
+/// libwdi names every package `usb_device.inf` by default, and the driver
+/// store keeps that as the package's original name, so without this nothing
+/// told our packages apart from anyone else's and each launch installed them
+/// all again. Lower case, because the driver store is searched lower-cased.
+pub fn inf_name(t: &Target) -> String {
+    let interface = t.interface.map(|i| format!("_mi{i:02x}")).unwrap_or_default();
+    format!("mirror_{:04x}_{:04x}{interface}.inf", t.vid, t.pid)
+}
+
 /// Quotes `s` as a single-quoted PowerShell string.
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -41,7 +53,7 @@ pub fn install_commands(wdi: &str, dest: &str, targets: &[Target]) -> String {
     let mut out = String::new();
     for t in targets {
         out.push_str(&format!(
-            "& {wdi} --vid 0x{:04X} --pid 0x{:04X}{} --type 0 --name {} --manufacturer {} --dest {} ; ",
+            "& {wdi} --vid 0x{:04X} --pid 0x{:04X}{} --type 0 --name {} --manufacturer {} --inf {} --dest {} ; ",
             t.vid,
             t.pid,
             t.interface
@@ -49,6 +61,7 @@ pub fn install_commands(wdi: &str, dest: &str, targets: &[Target]) -> String {
                 .unwrap_or_default(),
             ps_quote(t.name),
             ps_quote(PROVIDER),
+            ps_quote(&inf_name(t)),
             ps_quote(dest),
             wdi = ps_quote(wdi),
         ));
@@ -104,6 +117,12 @@ mod tests {
         };
         let s = install_commands("w.exe", "d", &[phone]);
         assert!(s.contains("--vid 0x04E8 --pid 0x6860 --iid 0 --type 0"));
+        assert!(s.contains("--inf 'mirror_04e8_6860_mi00.inf'"));
+    }
+
+    #[test]
+    fn a_whole_device_package_is_named_by_its_ids() {
+        assert_eq!(inf_name(&accessory(0x2D01)), "mirror_18d1_2d01.inf");
     }
 
     #[test]
