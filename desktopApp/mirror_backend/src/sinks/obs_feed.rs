@@ -501,7 +501,10 @@ pub fn install_plugin(project_root: &str) -> i32 {
     #[cfg(target_os = "macos")]
     let _ = std::fs::remove_dir_all(plugin_dir.join("mirror-source"));
 
-    if dst.parent().map_or(true, |d| std::fs::create_dir_all(d).is_err()) {
+    if dst
+        .parent()
+        .is_none_or(|d| std::fs::create_dir_all(d).is_err())
+    {
         log_event!(codes::OBS_INSTALL_MKDIR_FAILED);
         return -1;
     }

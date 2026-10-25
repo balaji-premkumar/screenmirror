@@ -377,7 +377,10 @@ mod tests {
         // alone used to mistake for phones.
         assert!(!ANDROID_VENDOR_IDS.contains(&0x04F3));
         assert!(ANDROID_VENDOR_IDS.contains(&0x04E8));
-        assert!(ANDROID_VENDOR_IDS.windows(2).all(|w| w[0] < w[1]), "keep the list sorted");
+        assert!(
+            ANDROID_VENDOR_IDS.windows(2).all(|w| w[0] < w[1]),
+            "keep the list sorted"
+        );
     }
 
     #[test]
