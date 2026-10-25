@@ -39,7 +39,10 @@ pub const PHONE_NAME: &str = "Android Phone (ScreenMirror)";
 /// told our packages apart from anyone else's and each launch installed them
 /// all again. Lower case, because the driver store is searched lower-cased.
 pub fn inf_name(t: &Target) -> String {
-    let interface = t.interface.map(|i| format!("_mi{i:02x}")).unwrap_or_default();
+    let interface = t
+        .interface
+        .map(|i| format!("_mi{i:02x}"))
+        .unwrap_or_default();
     format!("mirror_{:04x}_{:04x}{interface}.inf", t.vid, t.pid)
 }
 

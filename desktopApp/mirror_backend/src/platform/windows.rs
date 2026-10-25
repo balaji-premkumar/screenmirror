@@ -131,9 +131,7 @@ static DRIVER_STORE_CACHE: std::sync::Mutex<Option<(String, std::time::Instant)>
 fn driver_store() -> String {
     const TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-    let mut cache = DRIVER_STORE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut cache = DRIVER_STORE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((text, when)) = cache.as_ref() {
         if when.elapsed() < TTL {
             return text.clone();
@@ -223,7 +221,11 @@ fn backend_dir() -> Option<std::path::PathBuf> {
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut libc::c_void) -> i32;
+        fn GetModuleHandleExW(
+            flags: u32,
+            address: *const u16,
+            module: *mut *mut libc::c_void,
+        ) -> i32;
         fn GetModuleFileNameW(module: *mut libc::c_void, buf: *mut u16, size: u32) -> u32;
     }
     const FROM_ADDRESS: u32 = 0x4;
